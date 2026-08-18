@@ -1,4 +1,4 @@
-﻿name: 🍎 Build iOS App
+name: 🍎 Build iOS App
 
 on:
   push:
@@ -59,9 +59,16 @@ jobs:
             --no-codesign \
             --verbose
 
-      - name: 📤 Upload iOS build
+      - name: 📦 Package .ipa for Sideloadly
+        run: |
+          mkdir -p Payload
+          cp -r build/ios/iphoneos/Runner.app Payload/Runner.app
+          zip -r Runner.ipa Payload
+          echo "✅ Runner.ipa created successfully!"
+
+      - name: 📤 Upload .ipa file
         uses: actions/upload-artifact@v4
         with:
-          name: ios-build-${{ github.run_number }}
-          path: build/ios/iphoneos/Runner.app
-          retention-days: 7
+          name: Runner-ipa-${{ github.run_number }}
+          path: Runner.ipa
+          retention-days: 14

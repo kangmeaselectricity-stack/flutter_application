@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិប្រើប្រាស់មីក្រូហ្វូន ដើម្បីស្រង់អំណាននាឡិកាស្ទង់ដោយសំឡេង។</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិបំប្លែងសំឡេងទៅជាអត្ថបទ ដើម្បីបំពេញលេខកុងទ័រស្វ័យប្រវត្តិ។</string>
+	<key>NSCameraUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិប្រើប្រាស់កាមេរ៉ា ដើម្បីថតរូបកុងទ័រទឹក/ភ្លើង។</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>កម្មវិធីត្រូវការសិទ្ធិចាប់ទីតាំងដើម្បីគណនា UTM Coordinate បោះត្រាលើរូបភាពនាឡិកាទឹក។</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិប្រើប្រាស់ Bluetooth ដើម្បីស្កេន និងអានទិន្នន័យនាឡិកាស្ទង់ដោយស្វ័យប្រវត្ត។</string>
+	<key>NSBluetoothPeripheralUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិប្រើប្រាស់ Bluetooth ដើម្បីភ្ជាប់ទៅកាន់នាឡិកាស្ទង់។</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិចូលទៅកាន់បណ្ណាល័យរូបភាព ដើម្បីបង្ហាញ ឬរក្សាទុករូបភាពនាឡិកាស្ទង់។</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>កម្មវិធីនេះត្រូវការសិទ្ធិបន្ថែមរូបភាពទៅក្នុងបណ្ណាល័យរូបភាព ដើម្បីរក្សាទុករូបភាពដែលបានបោះត្រាទឹក។</string>
+
+	<!-- បន្ថែមបើមានការទាញយក ឬរក្សាទុកឯកសារ .db ទៅក្នុងម៉ាស៊ីន -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Flutter Application</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>flutter_application</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$(FLUTTER_BUILD_NAME)</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<key>CFBundleVersion</key>
+	<string>$(FLUTTER_BUILD_NUMBER)</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
+	<key>UIMainStoryboardFile</key>
+	<string>Main</string>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportedInterfaceOrientations~ipad</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>CADisableMinimumFrameDurationOnPhone</key>
+	<true/>
+	<key>UIApplicationSupportsIndirectInputEvents</key>
+	<true/>
+</dict>
+</plist>

@@ -1,0 +1,213 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+
+class DatabaseService {
+  static final DatabaseService _instance = DatabaseService._internal();
+  factory DatabaseService() => _instance;
+  DatabaseService._internal();
+
+  Database? _database;
+
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDb();
+    return _database!;
+  }
+
+  Future<Database> _initDb() async {
+    String databasesPath = await getDatabasesPath();
+    String path = join(databasesPath, "sn_meter.db");
+    bool exists = await databaseExists(path);
+
+    if (!exists) {
+      debugPrint("កំពុងចម្លង Database ពី Assets...");
+      try {
+        await Directory(dirname(path)).create(recursive: true);
+        ByteData data = await rootBundle.load(join("assets", "sn_meter.db"));
+        List<int> bytes = data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
+        await File(path).writeAsBytes(bytes, flush: true);
+        debugPrint("ចម្លងជោគជ័យ!");
+      } catch (e) {
+        debugPrint("កំហុសក្នុងការចម្លង Database: $e");
+      }
+    }
+
+    Database db = await openDatabase(path, version: 1);
+    await _checkAndAddMultiplierColumn(db);
+    return db;
+  }
+
+  // មុខងារនាំចូល File .db ពីខាងក្រៅ
+  Future<void> importDatabase(File pickedFile) async {
+    String databasesPath = await getDatabasesPath();
+    String path = join(databasesPath, "sn_meter.db");
+
+    if (_database != null) {
+      await _database!.close();
+      _database = null;
+    }
+
+    await pickedFile.copy(path);
+
+    // បើកដំណើរការឡើងវិញ និងត្រួតពិនិត្យ Column
+    Database db = await database;
+    await _checkAndAddMultiplierColumn(db);
+  }
+
+  Future<void> _checkAndAddMultiplierColumn(Database db) async {
+    try {
+      var columns = await db.rawQuery("PRAGMA table_info(sn_meter)");
+      bool hasMultiplier = columns.any(
+        (column) => column['name'] == 'multiplier',
+      );
+
+      if (!hasMultiplier) {
+        debugPrint("កំពុងបន្ថែម Column multiplier ទៅក្នុង Database...");
+        await db.execute(
+          "ALTER TABLE sn_meter ADD COLUMN multiplier REAL DEFAULT 1.0",
+        );
+        debugPrint("បន្ថែម Column ជោគជ័យ!");
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការបន្ថែម Column: $e");
+    }
+  }
+
+  // 💡 កែសម្រួល៖ ធានាសុវត្ថិភាពរវាង Key 'old'/'old_value' និង 'new'/'new_value' ឱ្យស៊ីជាមួយ UI ១០០%
+  Future<List<Map<String, dynamic>>> getCustomers() async {
+    final db = await database;
+    try {
+      final List<Map<String, dynamic>> res = await db.query('sn_meter');
+
+      return res.map((item) {
+        final newItem = Map<String, dynamic>.from(item);
+
+        // ១. សម្របសម្រួលផ្នែកអំណានចាស់ (Old Value)
+        if (newItem.containsKey('old') && !newItem.containsKey('old_value')) {
+          newItem['old_value'] = newItem['old'];
+        } else if (newItem.containsKey('old_value') &&
+            !newItem.containsKey('old')) {
+          newItem['old'] = newItem['old_value'];
+        }
+
+        // ២. សម្របសម្រួលផ្នែកអំណានថ្មី (New Value)
+        String currentNewVal = "";
+
+        // 🎯 ឆែកមើល Column new_value មុន បើគ្មានចាំឆែក Column new
+        if (newItem.containsKey('new_value') && newItem['new_value'] != null) {
+          String temp = newItem['new_value'].toString();
+          // បើវាជាលេខពិតប្រាកដ (មិនមែនជាអក្សរ តំបន់) និងមិនមែនជាលេខ ០
+          if (double.tryParse(temp) != null && double.parse(temp) > 0) {
+            currentNewVal = temp;
+          }
+        }
+
+        if (currentNewVal.isEmpty &&
+            newItem.containsKey('new') &&
+            newItem['new'] != null) {
+          String temp = newItem['new'].toString();
+          if (double.tryParse(temp) != null && double.parse(temp) > 0) {
+            currentNewVal = temp;
+          }
+        }
+
+        newItem['new_value'] = currentNewVal;
+        newItem['new'] = currentNewVal;
+
+        return newItem;
+      }).toList();
+    } catch (e) {
+      debugPrint("Error query: $e");
+      return [];
+    }
+  }
+
+  Future<List<String>> getUniqueValues(String columnName) async {
+    final db = await database;
+    try {
+      var res = await db.rawQuery(
+        'SELECT DISTINCT $columnName FROM sn_meter WHERE $columnName IS NOT NULL AND $columnName != "" ORDER BY $columnName ASC',
+      );
+      return res.map((e) => e[columnName].toString()).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // 💡 កូដកែសម្រួលរួចរាល់៖ ប្តូរឈ្មោះតារាងពី 'customers' ទៅជា 'sn_meter' ឱ្យត្រូវតាមដាតាបេសពិតប្រាកដរបស់អ្នក
+  // 💡 កែសម្រួល៖ រក្សាទុកទិន្នន័យទៅតាមទម្រង់ដើម និងបំប្លែងតម្លៃទៅជាលេខមានក្បៀស (double) មុននឹងបញ្ជូនទៅដាតាបេស
+  Future<int> updateReading(String code, String newValue) async {
+    final db = await database;
+
+    try {
+      final List<Map<String, dynamic>> tableInfo = await db.rawQuery(
+        "PRAGMA table_info(sn_meter)",
+      );
+      final List<String> columnNames = tableInfo
+          .map((e) => e['name'].toString())
+          .toList();
+
+      Map<String, dynamic> row = {};
+
+      // 🎯 ចំណុចដាច់ណាត់៖ បំប្លែងពី String ទៅជា double សុទ្ធ ដើម្បីឱ្យត្រូវទម្រង់ REAL របស់ដាតាបេសដើម
+      final double? numericValue = double.tryParse(newValue);
+
+      if (columnNames.contains('new_value')) {
+        row['new_value'] = numericValue; // Save ជាលេខ double
+      }
+      if (columnNames.contains('new')) {
+        row['new'] = numericValue; // Save ជាលេខ double
+      }
+
+      if (columnNames.contains('date_checked')) {
+        row['date_checked'] = DateTime.now().toString().split(' ')[0];
+      }
+
+      if (row.isEmpty) {
+        debugPrint("⚠️ រកមិនឃើញ Column សម្រាប់រក្សាទុកអំណានថ្មីទេ!");
+        return 0;
+      }
+
+      int count = await db.update(
+        'sn_meter',
+        row,
+        where: 'code = ?',
+        whereArgs: [code],
+      );
+
+      debugPrint(
+        "✅ [Desktop ស្គាល់ ១០០%] រក្សាទុកចូលដាតាបេស sn_meter រួចរាល់! (Code: $code, Value: $numericValue)",
+      );
+      return count;
+    } catch (e) {
+      debugPrint("❌ កំហុសក្នុងការរក្សាទុកចូល Database៖ $e");
+      return 0;
+    }
+  }
+
+  Future<String> getDatabasePath() async {
+    String databasesPath = await getDatabasesPath();
+    return join(databasesPath, "sn_meter.db");
+  }
+
+  // 💡 កែសម្រួល៖ សម្អាតទិន្នន័យអំណានថ្មីចេញពីគ្រប់ Columns ទាំងអស់ដែលមានក្នុងតារាង
+  Future<int> resetNewReadings() async {
+    final db = await database;
+    var columns = await db.rawQuery("PRAGMA table_info(sn_meter)");
+
+    Map<String, dynamic> resetValues = {'multiplier': 1.0};
+
+    if (columns.any((c) => c['name'] == 'new_value')) {
+      resetValues['new_value'] = null;
+    }
+    if (columns.any((c) => c['name'] == 'new')) resetValues['new'] = null;
+
+    return await db.update('sn_meter', resetValues);
+  }
+}

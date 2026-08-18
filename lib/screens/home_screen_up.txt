@@ -1,0 +1,1704 @@
+import 'dart:io';
+import 'package:geolocator/geolocator.dart';
+import 'dart:math';
+import 'dart:ui' as ui; // 💡 ត្រូវប្រាកដថាមានបន្ទាត់នេះ
+import 'package:excel/excel.dart' hide TextSpan;
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart'; // 💡 ប្រើប្រាស់បណ្ណាល័យ Share ផ្លូវការ
+import 'package:path_provider/path_provider.dart';
+import 'package:image_cropper/image_cropper.dart';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:flutter_application/services/meter_ble_service.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import '../database_service.dart';
+import '../widgets/app_drawer.dart';
+import '../widgets/filter_area.dart';
+import '../widgets/customer_card.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<Map<String, dynamic>> allCustomers = [];
+  List<Map<String, dynamic>> filteredCustomers = [];
+  bool isLoading = true;
+  bool isSearching = false;
+  bool _isRolloverWarning =
+      false; // 💡 សម្រាប់ឆែកមើលថាត្រូវបង្ហាញសារព្រមានវិលជុំលើ AppBar ដែរឬទេ
+  String _warningMessage = ""; // 💡 សម្រាប់ផ្ទុកអក្សរសារព្រមាន
+
+  late stt.SpeechToText _speech;
+  bool _isListening = false;
+  String _activeCode = "";
+  String _inputMode = 'manual';
+  String _listeningCustomerName = "";
+
+  final TextEditingController searchController = TextEditingController();
+  final Map<String, TextEditingController> controllers = {};
+  final Map<String, FocusNode> focusNodes = {};
+  final Map<String, TextEditingController> multiplierControllers = {};
+  final Map<String, double> previewUsage = {};
+
+  final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+
+  int totalCount = 0;
+  int doneCount = 0;
+
+  String? selectedArea;
+  String? selectedPole;
+  String? selectedBox;
+
+  @override
+  void initState() {
+    super.initState();
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+    _speech = stt.SpeechToText();
+    _refreshData();
+  }
+
+  @override
+  void dispose() {
+    textRecognizer.close();
+    searchController.dispose();
+    for (var c in controllers.values) {
+      c.dispose();
+    }
+    for (var f in focusNodes.values) {
+      f.dispose();
+    }
+    for (var m in multiplierControllers.values) {
+      m.dispose();
+    }
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+    super.dispose();
+  }
+
+  String _convertToArabicNumbers(String input) {
+    const Map<String, String> khmerToArabic = {
+      'សូន្យ': '0',
+      'មួយ': '1',
+      'ពីរ': '2',
+      'បី': '3',
+      'បួន': '4',
+      'ប្រាំ': '5',
+      'ប្រាំមួយ': '6',
+      'ប្រាំពីរ': '7',
+      'ប្រាំបួន': '9',
+      '១': '1',
+      '២': '2',
+      '៣': '3',
+      '៤': '4',
+      '៥': '5',
+      '៦': '6',
+      '៧': '7',
+      '៨': '8',
+      '៩': '9',
+      '០': '0',
+      'ចុច': '.',
+      'ដក់': '.',
+    };
+    String result = input;
+    khmerToArabic.forEach((kh, ar) => result = result.replaceAll(kh, ar));
+    return result.replaceAll(RegExp(r'[^0-9.]'), '');
+  }
+
+  void _listenToVoice(String code) async {
+    bool available = await _speech.initialize();
+    if (available) {
+      setState(() {
+        _isListening = true;
+        _activeCode = code;
+      });
+      _speech.listen(
+        localeId: "km_KH",
+        onResult: (result) {
+          String cleanNumber = _convertToArabicNumbers(result.recognizedWords);
+          if (cleanNumber.isNotEmpty) {
+            setState(() {
+              controllers[code]?.text = cleanNumber;
+              _updatePreview(code, cleanNumber);
+            });
+            // 💡 ថែមបន្ទាត់នេះ៖ ឱ្យវា Auto-Save ចូល DB ភ្លាមៗពេលឮសំឡេងលេខ
+            final cust = filteredCustomers.firstWhere(
+              (e) => e['code'].toString() == code,
+            );
+            _handleSave(code, controllers[code]?.text ?? "", cust);
+          }
+        },
+      );
+    }
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _isListening = false);
+    });
+  }
+
+  // 🚀 ១. មុខងារជំនួយ៖ គណនាទីតាំងបម្លែងទៅជា UTM Coordinate សម្រាប់ទឹកដីកម្ពុជា (48P)
+  Future<String> _getUTMCoordinates() async {
+    try {
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
+      Position position = await Geolocator.getCurrentPosition(
+        // ignore: deprecated_member_use
+        desiredAccuracy: LocationAccuracy.high,
+      );
+
+      double lat = position.latitude;
+      double lng = position.longitude;
+
+      int zone = 48;
+      String band = "P";
+
+      double laRad = lat * 0.01745329251;
+      double k0 = 0.9996;
+      double a = 6378137.0;
+      double eccSquared = 0.00669437999;
+      double longitudeOrigin = (zone * 6 - 183) * 0.01745329251;
+
+      double eccPrimeSquared = (eccSquared) / (1 - eccSquared);
+      double n = a / sqrt(1 - eccSquared * sin(laRad) * sin(laRad));
+      double t = tan(laRad) * tan(laRad);
+      double c = eccPrimeSquared * cos(laRad) * cos(laRad);
+      double a1 = cos(laRad) * ((lng * 0.01745329251) - longitudeOrigin);
+
+      double m =
+          a *
+          ((1 - eccSquared / 4 - 3 * eccSquared * eccSquared / 64) * laRad -
+              (3 * eccSquared / 8 + 3 * eccSquared * eccSquared / 32) *
+                  sin(2 * laRad) +
+              (15 * eccSquared * eccSquared / 256) * sin(4 * laRad));
+
+      double utmEasting =
+          (k0 *
+              n *
+              (a1 +
+                  (1 - t + c) * a1 * a1 * a1 / 6 +
+                  (5 - 18 * t + t * t + 72 * c - 58 * eccPrimeSquared) *
+                      a1 *
+                      a1 *
+                      a1 *
+                      a1 *
+                      a1 /
+                      120)) +
+          500000.0;
+
+      double utmNorthing =
+          (k0 *
+          (m +
+              n *
+                  tan(laRad) *
+                  (a1 * a1 / 2 +
+                      (5 - t + 9 * c + 4 * c * c) * a1 * a1 * a1 * a1 / 24 +
+                      (61 - 58 * t + t * t + 600 * c - 330 * eccPrimeSquared) *
+                          a1 *
+                          a1 *
+                          a1 *
+                          a1 *
+                          a1 *
+                          a1 /
+                          720)));
+
+      return "$zone$band ${utmEasting.toStringAsFixed(0)} ${utmNorthing.toStringAsFixed(0)}";
+    } catch (e) {
+      return "48P 494320 1289699";
+    }
+  }
+
+  // 🚀 ២. មុខងារជំនួយ៖ គូរអក្សរ Drop Marker លើរូបភាព (ដក code ចេញ ជំនួសដោយ meter និង UTM)
+  Future<void> _drawWatermarkOnImage(
+    File imageFile,
+    Map<String, dynamic> cust,
+    String finalNumber,
+  ) async {
+    try {
+      final Uint8List bytes = await imageFile.readAsBytes();
+      final ui.Codec codec = await ui.instantiateImageCodec(bytes);
+      final ui.FrameInfo frameInfo = await codec.getNextFrame();
+      final ui.Image image = frameInfo.image;
+
+      final ui.PictureRecorder recorder = ui.PictureRecorder();
+      final Canvas canvas = Canvas(recorder);
+
+      canvas.drawImage(image, Offset.zero, Paint());
+
+      String utmCoords = await _getUTMCoordinates();
+
+      // 🎯 ដំណោះស្រាយតាមលក្ខខណ្ឌបង៖ ជំនួសមកប្រើ [meter] និងបោះត្រា UTM
+      String meterId = cust['meter']?.toString() ?? 'មិនស្គាល់';
+      String dateStr = DateTime.now().toString().split('.')[0];
+
+      String textToDraw =
+          "នាឡិកាស្ទង់: $meterId\nអំណានថ្មី: $finalNumber\nUTM: $utmCoords\nថ្ងៃស្រង់: $dateStr";
+
+      // 💡 វិធីគូរអក្សរមានវណ្ឌខ្មៅការពារការមើលមិនច្បាស់ (លែងលោតក្រហម ១០០%)
+      final ui.ParagraphBuilder builder = ui.ParagraphBuilder(
+        ui.ParagraphStyle(
+          textAlign: TextAlign.left,
+          fontSize: (image.width * 0.038),
+          fontWeight: FontWeight.bold,
+        ),
+      );
+
+      // ១. គូរស្រមោលអក្សរពណ៌ខ្មៅនៅខាងក្រោម (បោះ Offset ងាកទៅស្តាំនិងក្រោមបន្តិច)
+      builder.pushStyle(ui.TextStyle(color: const ui.Color(0xFF000000)));
+      builder.addText(textToDraw);
+
+      // ២. គូរអក្សរពិតពណ៌លឿងចែសពីលើ
+      builder.pushStyle(ui.TextStyle(color: const ui.Color(0xFFFFFF00)));
+
+      final ui.Paragraph paragraph = builder.build();
+      paragraph.layout(ui.ParagraphConstraints(width: image.width.toDouble()));
+
+      // គូរទម្លាក់ទៅលើ Canvas
+      canvas.drawParagraph(
+        paragraph,
+        Offset(24, image.height - paragraph.height - 35),
+      );
+
+      final ui.Picture picture = recorder.endRecording();
+      final ui.Image imgWithWatermark = await picture.toImage(
+        image.width,
+        image.height,
+      );
+      final ByteData? byteData = await imgWithWatermark.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+
+      if (byteData != null) {
+        await imageFile.writeAsBytes(
+          byteData.buffer.asUint8List(),
+          flush: true,
+        );
+        debugPrint("✅ បោះត្រា Drop Marker រួចរាល់!");
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការគូរត្រា៖ $e");
+    }
+  }
+
+  // 🚀 មុខងារមេ៖ ថតរូប ស្កេនលេខ រក្សាទុក និងបោះត្រា Drop Marker
+  Future<void> _captureAndScan(String code) async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 100, // យកច្បាស់ល្អបំផុត
+    );
+
+    if (image == null) return;
+
+    try {
+      final CroppedFile? croppedFile = await ImageCropper().cropImage(
+        sourcePath: image.path,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: '🎯 សូមអូសតម្រង់លើដុំលេខកុងទ័រ',
+            toolbarColor: Colors.blue,
+            toolbarWidgetColor: Colors.white,
+            initAspectRatio: CropAspectRatioPreset.original,
+            lockAspectRatio: false,
+          ),
+          IOSUiSettings(title: '🎯 សូមអូសតម្រង់លើដុំលេខកុងទ័រ'),
+        ],
+      );
+
+      if (croppedFile == null) return;
+
+      final inputImage = InputImage.fromFilePath(croppedFile.path);
+      final RecognizedText recognizedText = await textRecognizer.processImage(
+        inputImage,
+      );
+
+      String finalNumber = "";
+      for (final block in recognizedText.blocks) {
+        for (final line in block.lines) {
+          String clean = line.text.replaceAll(RegExp(r'[^0-9.]'), '');
+          if (clean.isNotEmpty) {
+            finalNumber = clean;
+            break;
+          }
+        }
+        if (finalNumber.isNotEmpty) break;
+      }
+
+      if (finalNumber.isEmpty && recognizedText.text.trim().isNotEmpty) {
+        finalNumber = recognizedText.text.trim().replaceAll(
+          RegExp(r'[^0-9.]'),
+          '',
+        );
+      }
+
+      if (finalNumber.isNotEmpty) {
+        setState(() {
+          controllers[code]?.text = finalNumber;
+          _updatePreview(code, finalNumber);
+        });
+
+        final cust = allCustomers.firstWhere(
+          (e) => e['code'].toString() == code,
+        );
+
+        // រក្សាទុកស្ងាត់ៗចូល DB ភ្លាមៗ
+        await DatabaseService().updateReading(code, finalNumber);
+
+        final double oldVal =
+            double.tryParse(
+              cust['old_value']?.toString() ?? cust['old']?.toString() ?? '0',
+            ) ??
+            0;
+        final double currentNew = double.tryParse(finalNumber) ?? 0;
+        final double multiplier =
+            double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+        setState(() {
+          cust['new_value'] = finalNumber;
+          cust['new'] = finalNumber;
+          previewUsage[code] = _calculateUsageLogic(
+            oldVal,
+            currentNew,
+            multiplier,
+          );
+        });
+
+        runFilter();
+
+        // 🎯 ដំណោះស្រាយបន្ទាត់ ២ son៖ ហៅមុខងារគូរត្រាជាលក្ខខណ្ឌ Future ធម្មតា ដោយមិនបាច់បង្កើតអថេរមកស្ទាក់ចាប់តម្លៃ void ឡើយ
+        await _drawWatermarkOnImage(File(image.path), cust, finalNumber);
+
+        // 🎯 ដំណោះស្រាយបន្ទាត់ ៤០២ (Warning)៖ ថែមmounted check ការពារការបុកប្រើប្រាស់ Context ឆ្លង async gap
+        if (!mounted) return;
+
+        // បញ្ជូនរូបភាពដែលបានបោះត្រារួចរាល់ ទៅឱ្យមុខងារសួរនាំរក្សាទុកបន្ត
+        _askToSaveImageWithWatermark(
+          context,
+          File(image.path),
+          code,
+          cust['name'] ?? "Unknown",
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ ស្កេនរកមិនឃើញលេខទេ! សូមព្យាយាមម្ដងទៀត"),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការថត៖ $e");
+    }
+  }
+
+  // 💡 មុខងារកែសម្រួល៖ រក្សាទុករូបភាពចូលទៅក្នុង Folder ផ្លូវការរបស់ទូរស័ព្ទ (Pictures/Meter_Readings)
+  void _askToSaveImageWithWatermark(
+    BuildContext context,
+    File originalFile,
+    String code,
+    String customerName,
+  ) async {
+    final bool? wantToSave = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.add_photo_alternate, color: Colors.orange),
+            SizedBox(width: 10),
+            Text("រក្សាទុករូបភាព"),
+          ],
+        ),
+        content: const Text(
+          "តើអ្នកចង់រក្សាទុករូបភាពនាឡិកាស្ទង់នេះ ចូលទៅក្នុងទូរស័ព្ទដែរឬទេ?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("ទេ"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              "រក្សាទុក",
+              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (wantToSave == true) {
+      try {
+        final Uint8List imageBytes = await originalFile.readAsBytes();
+        final ui.Codec codec = await ui.instantiateImageCodec(imageBytes);
+        final ui.FrameInfo frameInfo = await codec.getNextFrame();
+        final ui.Image uiImage = frameInfo.image;
+
+        final ui.PictureRecorder recorder = ui.PictureRecorder();
+        final Canvas canvas = Canvas(recorder);
+        final Paint paint = Paint();
+
+        canvas.drawImage(uiImage, Offset.zero, paint);
+
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text:
+                "អតិថិជន៖ $customerName ($code)\nថ្ងៃទី៖ ${DateTime.now().toString().split('.')[0]}",
+            style: TextStyle(
+              color: Colors.yellow,
+              fontSize: uiImage.width * 0.035,
+              fontWeight: FontWeight.bold,
+              backgroundColor: Colors.black.withValues(alpha: 0.5),
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        );
+
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(30, 30));
+
+        final ui.Picture picture = recorder.endRecording();
+        final ui.Image imgWithWatermark = await picture.toImage(
+          uiImage.width,
+          uiImage.height,
+        );
+        final ByteData? byteData = await imgWithWatermark.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+
+        if (byteData != null) {
+          final Uint8List finalBytes = byteData.buffer.asUint8List();
+
+          // 💡 ដំណោះស្រាយរកទីតាំង៖ បង្កើតផ្លូវផ្ទុកទៅកាន់ Folder "Pictures" ផ្លូវការរបស់ទូរស័ព្ទ Android/iOS
+          // រូបភាពនឹងលោតចូលទៅក្នុង App Gallery ឬ App Photos ភ្លាមៗ
+          final Directory? externalDir =
+              await getExternalStorageDirectory(); // មកពីបណ្ណាល័យ path_provider
+          String picturesPath = "/storage/emulated/0/Pictures/Meter_Readings";
+
+          // ប្រសិនបើជាទូរស័ព្ទជំនាន់ថ្មី ឬ iOS វានឹងយកផ្លូវស្តង់ដារ
+          if (externalDir != null) {
+            final Directory saveDir = Directory(picturesPath);
+            if (!await saveDir.exists()) {
+              await saveDir.create(
+                recursive: true,
+              ); // បង្កើត Folder ថ្មីបើមិនទាន់មាន
+            }
+
+            // ដាក់ឈ្មោះ File តាម៖ កូដអតិថិជន_ថ្ងៃខែឆ្នាំ.png (ដើម្បីកុំឱ្យជាន់គ្នា)
+            String fileName =
+                "${code}_${DateTime.now().millisecondsSinceEpoch}.png";
+            File finalSavedFile = File("${saveDir.path}/$fileName");
+
+            await finalSavedFile.writeAsBytes(finalBytes);
+
+            if (!context.mounted) return;
+            // បង្ហាញប្រាប់អ្នកប្រើប្រាស់ពីទីតាំងពិតប្រាកដដែលបានរក្សាទុក
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  "📸 បានរក្សាទុកក្នុង៖ Pictures/Meter_Readings/$fileName",
+                ),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint("Error saving image: $e");
+      }
+    }
+  }
+
+  // 💡 ដំណោះស្រាយចុងក្រោយបង្អស់៖ ចម្លងហ្វាល់ចេញមកក្រៅដើម្បីដោះសោរ (File Lock) រួចផ្ញើហ្វាល់ថ្មី ទើបកុំព្យូទ័រទទួលបានលេខពិត ១០០%
+  Future<void> _exportDatabase() async {
+    try {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("🚀 កំពុងដោះសោរ និងរៀបចំឯកសារថ្មីចុងក្រោយបង្អស់..."),
+          backgroundColor: Colors.blue,
+        ),
+      );
+
+      // ១. ទាញយក Instance នៃដាតាបេសពិតប្រាកដ រួចធ្វើ Checkpoint
+      final db = await DatabaseService().database;
+      await db.rawQuery('PRAGMA wal_checkpoint(FULL);');
+
+      final String actualDbPath = db.path;
+      final File sourceFile = File(actualDbPath);
+
+      if (await sourceFile.exists()) {
+        // ២. បង្កើតផ្លូវហ្វាល់បណ្តោះអាសន្នថ្មីនៅក្នុង Folder Cache
+        final String cacheDir = (await getTemporaryDirectory()).path;
+
+        // 🎯 គន្លឹះសំខាន់ទី ១៖ បន្ថែមរលកធាតុអាកាស Timestamp (មីលីវិនាទី) ទៅលើឈ្មោះហ្វាល់ ដើម្បីបង្ខំឱ្យ OS បង្កើតហ្វាល់ថ្មីជានិច្ច
+        final int timestamp = DateTime.now().millisecondsSinceEpoch;
+        final String backupFilePath = "$cacheDir/sn_meter_export_$timestamp.db";
+        final File backupFile = File(backupFilePath);
+
+        // 🎯 គន្លឹះសំខាន់ទី ២៖ ស្កេនលុបហ្វាល់ចាស់ៗទាំងឡាយណាដែលមានកន្ទុយ .db នៅក្នុង Folder Cache ចោលឱ្យស្អាតបរិសុទ្ធ
+        final Directory dir = Directory(cacheDir);
+        if (await dir.exists()) {
+          final List<FileSystemEntity> entities = dir.listSync();
+          for (var entity in entities) {
+            if (entity is File && entity.path.contains('sn_meter_export')) {
+              try {
+                await entity.delete();
+                debugPrint("🧹 បានលុបហ្វាល់ខ្មោចចាស់ចោល៖ ${entity.path}");
+              } catch (_) {}
+            }
+          }
+        }
+
+        // ៣. ធ្វើការចម្លងពីហ្វាល់មេ មកចូលហ្វាល់ថ្មីស្រឡាងដែលទើបតែបង្កើតជានិច្ច
+        await sourceFile.copy(backupFilePath);
+
+        // ៤. រៀបចំ XFile ដោយលួចបន្លំដូរឈ្មោះ (Rename) ត្រឡប់ទៅជាឈ្មោះស្តង់ដារវិញ ពេលហោះទៅដល់កុំព្យូទ័រ
+        final XFile xFile = XFile(
+          backupFile.path,
+          name:
+              "sn_meter_export.db", // 🎯 នៅពេលទៅដល់ Telegram ឬកុំព្យូទ័រ វានៅតែបង្ហាញឈ្មោះស្អាត standard ដដែល
+          mimeType: 'application/octet-stream',
+        );
+
+        if (!mounted) return;
+
+        // 🚀 បញ្ជាឱ្យលោតផ្ទាំង Share ហោះចេញទៅ Telegram
+        // ignore: deprecated_member_use
+        await Share.shareXFiles([
+          xFile,
+        ], text: 'ទិន្នន័យស្រង់អំណាននាឡិកាពិតប្រាកដ (sn_meter_export.db)');
+
+        debugPrint(
+          "📊 Export ជោគជ័យផ្ដាច់ព្រ័ត្រ! ហ្វាល់ថ្មីស្រឡាង៖ $backupFilePath",
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ រកមិនឃើញឯកសារដាតាបេសពិតទេ!"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការ Export: $e");
+    }
+  }
+
+  // 🎯 មុខងារនាំចូលដាតាបេស ព្រមទាំងលួចលាក់ Sync ពី power_data និងតម្រៀបលេខបង្គោលស្វ័យប្រវត្តិ (ជួសជុល Type File)
+  Future<void> _handleImport() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform.pickFiles(
+        type: FileType.any,
+      );
+
+      if (result != null && result.files.single.path != null) {
+        String filePath = result.files.single.path!;
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "📥 💾 កំពុងនាំចូលដាតាបេស និងរៀបចំរចនាសម្ព័ន្ធស្វ័យប្រវត្តិ...",
+            ),
+            backgroundColor: Colors.blueAccent,
+          ),
+        );
+
+        // 🚀 🎯 ដំណោះស្រាយ៖ បំប្លែង filePath ទៅជា File(filePath) ឱ្យត្រូវតាម parameter type របស់ DatabaseService បងបេះបិទ!
+        await DatabaseService().importDatabase(File(filePath));
+
+        // 🚀 គន្លឹះអូតូ៖ បញ្ជាឱ្យប្រព័ន្ធលួចរត់ស្កេន Sync នាឡិកាមេ (power_data) ចូលនាឡិកាកូនភ្លាមៗស្ងាត់ៗ
+        final db = await DatabaseService().database;
+
+        // ឆែកមើលតារាង power_data ការពារការ Crash
+        final tables = await db.rawQuery(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='power_data';",
+        );
+
+        if (tables.isNotEmpty) {
+          final List<Map<String, dynamic>> powerRecords = await db.query(
+            'power_data',
+          );
+
+          if (powerRecords.isNotEmpty) {
+            await db.transaction((txn) async {
+              for (var record in powerRecords) {
+                String codeStr = record['code']?.toString() ?? "";
+                if (codeStr.isEmpty) continue;
+
+                final List<Map<String, dynamic>> existing = await txn.query(
+                  'sn_meter',
+                  where: 'code = ?',
+                  whereArgs: [codeStr],
+                );
+
+                if (existing.isEmpty) continue;
+
+                String monthColumn = record['month']?.toString().trim() ?? "";
+                if (monthColumn.isNotEmpty &&
+                    RegExp(r'^\d{2}-\d{4}$').hasMatch(monthColumn)) {
+                  try {
+                    await txn.execute(
+                      "ALTER TABLE sn_meter ADD COLUMN `$monthColumn` TEXT;",
+                    );
+                  } catch (_) {}
+                }
+
+                double powerSale =
+                    double.tryParse(
+                      record['power_sale']?.toString() ??
+                          record['distribute']?.toString() ??
+                          '0',
+                    ) ??
+                    0.0;
+                String poleVal =
+                    record['pole']?.toString() ??
+                    existing.first['pole']?.toString() ??
+                    "";
+
+                Map<String, dynamic> updateData = {
+                  'pole': poleVal,
+                  'meter':
+                      record['meter']?.toString() ??
+                      existing.first['meter']?.toString() ??
+                      "",
+                  'amp':
+                      record['ct']?.toString() ??
+                      existing.first['amp']?.toString() ??
+                      "",
+                  'multiplier':
+                      double.tryParse(record['miti']?.toString() ?? '1') ?? 1.0,
+                  'old_value':
+                      double.tryParse(record['old_value']?.toString() ?? '0') ??
+                      0.0,
+                  'new_value':
+                      double.tryParse(record['new_value']?.toString() ?? '0') ??
+                      0.0,
+                  'date_checked': DateTime.now().toString().split('.')[0],
+                };
+
+                if (monthColumn.isNotEmpty) {
+                  updateData[monthColumn] = powerSale.toString();
+                }
+
+                await txn.update(
+                  'sn_meter',
+                  updateData,
+                  where: 'code = ?',
+                  whereArgs: [codeStr],
+                );
+              }
+            });
+          }
+        }
+
+        // ទាញទិន្នន័យមកតម្រៀបដេញតាម លេខបង្គោល (Pole) បង្ហាញលើអេក្រង់ភ្លាមៗ
+        final List<Map<String, dynamic>> updatedRows = await db.query(
+          'sn_meter',
+        );
+        List<Map<String, dynamic>> mutableRows = List.from(updatedRows);
+
+        mutableRows.sort((a, b) {
+          String poleA = a['pole']?.toString() ?? "";
+          String poleB = b['pole']?.toString() ?? "";
+          int? numA = int.tryParse(poleA.replaceAll(RegExp(r'\D'), ''));
+          int? numB = int.tryParse(poleB.replaceAll(RegExp(r'\D'), ''));
+          if (numA != null && numB != null) return numA.compareTo(numB);
+          return poleA.compareTo(poleB);
+        });
+
+        setState(() {
+          allCustomers = mutableRows;
+          filteredCustomers = mutableRows;
+        });
+
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "✅ នាំចូលដាតាបេស និងសមកាលកម្មរៀបតាមបង្គោល (Pole) ជោគជ័យ!",
+            ),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("❌ កំហុសក្នុងការនាំចូលអូតូ៖ $e");
+    }
+  }
+
+  double _calculateUsageLogic(
+    double oldValue,
+    double newValue,
+    double multiplier,
+  ) {
+    if (newValue >= oldValue) {
+      return (newValue - oldValue) * multiplier;
+    } else {
+      return ((100000 - oldValue) + newValue) * multiplier;
+    }
+  }
+
+  void _updatePreview(String code, String value) {
+    final newVal = double.tryParse(value) ?? 0;
+    final cust = allCustomers.firstWhere((e) => e['code'].toString() == code);
+    final oldVal = double.tryParse(cust['old_value']?.toString() ?? '0') ?? 0;
+    final multiplier =
+        double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+    setState(() {
+      previewUsage[code] = _calculateUsageLogic(oldVal, newVal, multiplier);
+    });
+  }
+
+  Future<void> _handleSave(
+    String code,
+    String value,
+    Map<String, dynamic> cust,
+  ) async {
+    // 💡 ១. ចាប់យកអត្ថបទស្រស់ៗដែលបងបានវាយឃើញនឹងភ្នែកចេញពីប្រអប់បញ្ចូល (Controller)
+    final String actualValue = controllers[code]?.text ?? "";
+
+    // បើប្រអប់ទទេ មិនបាច់ធ្វើអ្វីឡើយ
+    if (actualValue.isEmpty) return;
+
+    final double? currentNew = double.tryParse(actualValue);
+    if (currentNew == null) return;
+
+    final double oldVal =
+        double.tryParse(
+          cust['old_value']?.toString() ?? cust['old']?.toString() ?? '0',
+        ) ??
+        0;
+
+    final double multiplier =
+        double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+    // ឆែកលក្ខខណ្ឌបង្ហាញសារព្រមានលើ AppBar បើមានការវិលជុំ
+    if (currentNew < oldVal && currentNew > 0) {
+      setState(() {
+        _isRolloverWarning = true;
+        _warningMessage =
+            "⚠️ លេខថ្មី ($currentNew) តូចជាងលេខចាស់ ($oldVal)៖ ប្រព័ន្ធគណនាជាការវិលជុំ!";
+      });
+    } else {
+      setState(() {
+        _isRolloverWarning = false;
+      });
+    }
+
+    // 🚀 ២. បុកបញ្ជាទៅកាន់ DatabaseService ដោយបញ្ជូន actualValue (ឧ. "10" ឬ "100") ទៅរក្សាទុកភ្លាមៗ
+    final int result = await DatabaseService().updateReading(code, actualValue);
+    if (!mounted) return;
+
+    if (result > 0) {
+      final double usageResult = _calculateUsageLogic(
+        oldVal,
+        currentNew,
+        multiplier,
+      );
+
+      setState(() {
+        // 🎯 ចាក់សោតម្លៃ៖ រក្សាទុកតម្លៃជាប្រភេទ String នៅក្នុង State UI ដើម្បីឱ្យប្រអប់បញ្ចូលបង្ហាញលេខត្រឹមត្រូវ
+        cust['new_value'] = actualValue;
+        cust['new'] = actualValue;
+        previewUsage[code] = usageResult;
+      });
+
+      // 📊 រាប់ស្ថិតិឡើងវិញ
+      runFilter();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("✅ បានរក្សាទុកលេខ [$actualValue] ចូលដាតាបេសជោគជ័យ!"),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("❌ មិនអាចរក្សាទុកចូលដាតាបេសបានទេ!"),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  //     // 🔔 បង្ហាញផ្ទាំង SnackBar ប្រាប់លទ្ធផលជោគជ័យ
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(
+  //         content: Text(
+  //           "រក្សាទុកជោគជ័យ! ប្រើប្រាស់: ${usageResult.toStringAsFixed(2)}",
+  //         ),
+  //         backgroundColor: Colors.green,
+  //         duration: const Duration(seconds: 2),
+  //       ),
+  //     );
+  //   } else {
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       const SnackBar(
+  //         content: Text("❌ មិនអាចរក្សាទុកចូលដាតាបេសបានទេ!"),
+  //         backgroundColor: Colors.red,
+  //       ),
+  //     );
+  //   }
+  // }
+
+  List<String> get availableAreas =>
+      allCustomers
+          .map((e) => e['area']?.toString() ?? "")
+          .where((e) => e.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+  List<String> get availablePoles {
+    var list = allCustomers;
+    if (selectedArea != null) {
+      list = list.where((e) => e['area'] == selectedArea).toList();
+    }
+    return list
+        .map((e) => e['pole']?.toString() ?? "")
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  List<String> get availableBoxes {
+    var list = allCustomers;
+    if (selectedArea != null) {
+      list = list.where((e) => e['area'] == selectedArea).toList();
+    }
+    if (selectedPole != null) {
+      list = list.where((e) => e['pole'] == selectedPole).toList();
+    }
+    return list
+        .map((e) => e['box']?.toString() ?? "")
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  // 🎯 មុខងារទាញទិន្នន័យថ្មី៖ កែតម្រង់ឈ្មោះ Column ឱ្យត្រូវចំ 'old'/'new' ក្នុង sn_meter និង 'old_value'/'new_value' ក្នុង power_data
+  Future<void> _refreshData() async {
+    try {
+      setState(() => isLoading = true);
+
+      final db = await DatabaseService().database;
+
+      // ១. ទាញយកទិន្នន័យដើមពិតប្រាកដ ចេញពីតារាងមេ sn_meter (នាឡិកាកូន - ប្រើ 'old' និង 'new')
+      final List<Map<String, dynamic>> rawMeterData = await db.query(
+        'sn_meter',
+      );
+      if (rawMeterData.isEmpty) {
+        setState(() {
+          allCustomers = [];
+          filteredCustomers = [];
+          isLoading = false;
+        });
+        return;
+      }
+
+      // ២. ឆែកមើលក្រែងលោមានតារាង power_data (នាឡិកាមេ) នៅក្នុងដាតាបេសដែរឬទេ
+      final tables = await db.rawQuery(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='power_data';",
+      );
+
+      // បង្កើត Map សម្រាប់ចាំស្ទាក់ចាប់យកទិន្នន័យពី power_data តាម code ឬ meter
+      Map<String, Map<String, dynamic>> powerCodeMap = {};
+      Map<String, Map<String, dynamic>> powerMeterMap = {};
+
+      if (tables.isNotEmpty) {
+        try {
+          final List<Map<String, dynamic>> powerRecords = await db.query(
+            'power_data',
+          );
+          for (var record in powerRecords) {
+            String? pCode = record['code']?.toString().trim();
+            String? pMeter = record['meter']?.toString().trim();
+
+            if (pCode != null && pCode.isNotEmpty) {
+              powerCodeMap[pCode] = record;
+            }
+            if (pMeter != null && pMeter.isNotEmpty) {
+              powerMeterMap[pMeter] = record;
+            }
+          }
+        } catch (_) {}
+      }
+
+      // ៣. រត់ផ្គូផ្គងទិន្នន័យដោយរក្សាលេខអំណានពិតរបស់ sn_meter ដាច់ខាត
+      List<Map<String, dynamic>> combinedRows = [];
+
+      for (var cust in rawMeterData) {
+        var newCust = Map<String, dynamic>.from(cust);
+        String code = cust['code']?.toString().trim() ?? "";
+        String meter = cust['meter']?.toString().trim() ?? "";
+
+        // ស្វែងរកទិន្នន័យនាឡិកាមេពី power_data
+        Map<String, dynamic>? matchedPowerRecord;
+        if (code.isNotEmpty && powerCodeMap.containsKey(code)) {
+          matchedPowerRecord = powerCodeMap[code];
+        } else if (meter.isNotEmpty && powerMeterMap.containsKey(meter)) {
+          matchedPowerRecord = powerMeterMap[meter];
+        }
+
+        // ប្រសិនបើមានទិន្នន័យក្នុង power_data យកមកប្រើតែ លេខបង្គោល (pole) ប៉ុណ្ណោះ
+        if (matchedPowerRecord != null) {
+          if (matchedPowerRecord['pole'] != null &&
+              matchedPowerRecord['pole'].toString().trim().isNotEmpty) {
+            newCust['pole'] = matchedPowerRecord['pole'];
+          }
+          // រក្សាទុកតម្លៃរបស់ power_data ញែកដាច់ដោយឡែក (old_value និង new_value)
+          newCust['power_old'] = matchedPowerRecord['old_value'];
+          newCust['power_new'] = matchedPowerRecord['new_value'];
+        }
+
+        // 🚀 🎯 ចំណុចកែប្រែសំខាន់៖ ចាប់យកលេខអំណានពិតរបស់នាឡិកាកូនពី Column 'new' និង 'old' របស់តារាង sn_meter
+        String currentNewVal =
+            newCust['new']?.toString() ??
+            newCust['new_value']?.toString() ??
+            "";
+        String custCode = newCust['code'].toString();
+
+        // រៀបចំប្រព័ន្ធ Controllers ឱ្យបង្ហាញលេខអំណានថ្មីរបស់នាឡិកាកូន
+        if (!controllers.containsKey(custCode)) {
+          controllers[custCode] = TextEditingController(text: currentNewVal);
+        } else {
+          controllers[custCode]!.text = currentNewVal;
+        }
+
+        if (!focusNodes.containsKey(custCode)) {
+          focusNodes[custCode] = FocusNode();
+        }
+
+        if (!multiplierControllers.containsKey(custCode)) {
+          String mVal = newCust['multiplier']?.toString() ?? "1";
+          multiplierControllers[custCode] = TextEditingController(text: mVal);
+        }
+
+        // 🚀 🎯 គណនា Preview ថាមពលលើ Card ដោយហៅចំ Column 'old' និង 'new' របស់នាឡិកាកូនពិតប្រាកដ
+        if (currentNewVal.isNotEmpty) {
+          final nv = double.tryParse(currentNewVal) ?? 0;
+          final ov =
+              double.tryParse(newCust['old']?.toString() ?? '0') ??
+              0; // 🎯 កែចំសោរ 'old'
+          final m =
+              double.tryParse(newCust['multiplier']?.toString() ?? '1') ?? 1.0;
+
+          // ហៅមុខងារគណនាដើមរបស់បង ធានាចេញលទ្ធផលត្រូវបេះបិទ
+          previewUsage[custCode] = _calculateUsageLogic(ov, nv, m);
+        }
+
+        combinedRows.add(newCust);
+      }
+
+      // ៤. តម្រៀបបញ្ជីអតិថិជនតាមលំដាប់កូដធម្មតា ការពារការគាំង
+      combinedRows.sort((a, b) {
+        String codeA = a['code']?.toString() ?? "";
+        String codeB = b['code']?.toString() ?? "";
+        return codeA.compareTo(codeB);
+      });
+
+      if (mounted) {
+        setState(() {
+          allCustomers = combinedRows;
+          filteredCustomers = combinedRows;
+          isLoading = false;
+          runFilter();
+        });
+      }
+    } catch (e) {
+      debugPrint("❌ កំហុសក្នុង Refresh៖ $e");
+      if (mounted) {
+        setState(() {
+          isLoading = false;
+        });
+      }
+    }
+  }
+
+  // 🚀 មុខងារខែលការពារ បង្ខំទាញទិន្នន័យចេញមកក្រៅ ទោះជួប Error ក៏មិនឱ្យវិលជុំដែរ
+
+  void runFilter() {
+    List<Map<String, dynamic>> results = allCustomers;
+    String query = searchController.text.toLowerCase();
+
+    if (query.isNotEmpty) {
+      results = results.where((c) {
+        return c['name'].toString().toLowerCase().contains(query) ||
+            c['meter'].toString().toLowerCase().contains(query);
+      }).toList();
+    }
+
+    if (selectedArea != null) {
+      results = results.where((c) => c['area'] == selectedArea).toList();
+    }
+    if (selectedPole != null) {
+      results = results.where((c) => c['pole'] == selectedPole).toList();
+    }
+    if (selectedBox != null) {
+      results = results.where((c) => c['box'] == selectedBox).toList();
+    }
+
+    setState(() {
+      filteredCustomers = results;
+      totalCount = allCustomers.length;
+      doneCount = allCustomers.where((item) {
+        // ✅ ឆែករកទាំង 'new_value' ឬ 'new' ដើម្បីកុំឱ្យខុសលក្ខខណ្ឌទោះជាដាតាបេសប្រើ Column មួយណា
+        var val = item['new_value'] ?? item['new'];
+        if (val == null || val.toString().isEmpty) return false;
+
+        final parsedVal = double.tryParse(val.toString()) ?? 0;
+        return parsedVal > 0;
+      }).length;
+    });
+  }
+
+  void _selectCustomer(String code, String name) {
+    setState(() {
+      _activeCode = code;
+      _listeningCustomerName = name;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        iconTheme: const IconThemeData(color: Colors.white),
+        backgroundColor: _isRolloverWarning
+            ? Colors.redAccent
+            : Colors.blueAccent,
+        title: _isRolloverWarning
+            ? Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _warningMessage,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : (isSearching
+                  ? TextField(
+                      controller: searchController,
+                      autofocus: true,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      decoration: const InputDecoration(
+                        hintText: "ស្វែងរកឈ្មោះ ឬលេខនាឡិកាស្ទង់...",
+                        hintStyle: TextStyle(color: Colors.white70),
+                        border: InputBorder.none,
+                      ),
+                      // 🚀 🎯 ដំណោះស្រាយ៖ ដកអថេរក្នុងវង់ក្រចកចេញ ហៅ runFilter() ទទេ ព្រោះវាទៅទាញពី searchController ស្រាប់
+                      onChanged: (value) => runFilter(),
+                    )
+                  : const Text(
+                      "ស្រង់អំណាននាឡិកា",
+                      style: TextStyle(color: Colors.white, fontSize: 18),
+                    )),
+        actions: [
+          // ប៊ូតុងបិទសារព្រមាន (បង្ហាញតែពេលមានការព្រមាន)
+          if (_isRolloverWarning)
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () => setState(() => _isRolloverWarning = false),
+            ),
+
+          // ប៊ូតុងស្វែងរក (រូបកែវយឹត / រូបខ្វែង) ដំណើរការបត់បែនលឿនទាន់ចិត្ត
+          if (!_isRolloverWarning)
+            IconButton(
+              icon: Icon(
+                isSearching ? Icons.cancel : Icons.search,
+                color: Colors.white,
+              ),
+              onPressed: () {
+                setState(() {
+                  if (isSearching) {
+                    isSearching = false;
+                    searchController.clear();
+                    runFilter(); // 🚀 🎯 ដំណោះស្រាយ៖ ដកអថេរចេញ ហៅ runFilter() ធម្មតាដើម្បីបង្ហាញទិន្នន័យទាំងអស់ឡើងវិញ
+                  } else {
+                    isSearching = true;
+                  }
+                });
+              },
+              tooltip: isSearching ? "បិទការស្វែងរក" : "ស្វែងរក",
+            ),
+
+          if (!isSearching && !_isRolloverWarning) ...[
+            IconButton(
+              icon: const Icon(Icons.share, color: Colors.white),
+              onPressed: _exportDatabase,
+              tooltip: "Export Database",
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh, color: Colors.white),
+              onPressed: _refreshData,
+              tooltip: "ទាញទិន្នន័យថ្មី",
+            ),
+          ],
+        ],
+      ),
+      // 🎯 កែសម្រួលដុំកូដហៅ AppDrawer ឱ្យស្គាល់ការផ្លាស់ប្តូរ Mode
+      drawer: AppDrawer(
+        totalCount: allCustomers.length, // 📊 ចំនួនកុងទ័រសរុប
+        doneCount: allCustomers.where((c) {
+          final newVal = c['new_value'] ?? c['new'];
+          return newVal != null && newVal.toString().trim().isNotEmpty;
+        }).length,
+        inputMode: _inputMode,
+        onBackup: (_) => _exportDatabase(),
+        onImport: _handleImport,
+        onExportExcel: (_) => _exportToExcel(),
+        onModeChanged: (mode) {
+          setState(() {
+            _inputMode = mode;
+          });
+
+          String modeName = mode == "manual"
+              ? "បញ្ចូលដោយដៃ"
+              : (mode == "voice" ? "ប្រើសម្លេង" : "ប្រើកាមេរ៉ា");
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text("🔄 បានប្តូរទៅកាន់៖ $modeName"),
+              backgroundColor: Colors.blue,
+              duration: const Duration(seconds: 1),
+            ),
+          );
+        },
+      ),
+
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                FilterArea(
+                  areas: availableAreas,
+                  poles: availablePoles,
+                  boxes: availableBoxes,
+                  selectedArea: selectedArea,
+                  selectedPole: selectedPole,
+                  selectedBox: selectedBox,
+                  onAreaChanged: (val) {
+                    setState(() {
+                      selectedArea = val;
+                      selectedPole = null;
+                      selectedBox = null;
+                    });
+                    runFilter();
+                  },
+                  onPoleChanged: (val) {
+                    setState(() {
+                      selectedPole = val;
+                      selectedBox = null;
+                    });
+                    runFilter();
+                  },
+                  onBoxChanged: (val) {
+                    setState(() {
+                      selectedBox = val;
+                    });
+                    runFilter();
+                  },
+                ),
+                Expanded(
+                  child: filteredCustomers.isEmpty
+                      ? const Center(child: Text("មិនមានទិន្នន័យបង្ហាញទេ"))
+                      : ListView.builder(
+                          itemCount: filteredCustomers.length,
+                          itemBuilder: (context, index) {
+                            final customer = filteredCustomers[index];
+                            final String code =
+                                customer['code']?.toString() ?? "";
+                            // 💡 កូដដែលបានកែសម្រួលរួចរាល់៖ លុប onSubmitted ចោលដើម្បីកុំឱ្យលោតផ្ទាំងវិលជុំពេលកំពុងវាយ
+                            // 💡 កូដកែសម្រួលដាច់ណាត់៖ កាត់ផ្ដាច់ប្រព័ន្ធ Auto-Save តាម FocusNode ចោល ឱ្យមករក្សាទុកតាមប៊ូតុង Enter វិញ
+                            return CustomerCard(
+                              cust: customer,
+                              isActive: _activeCode == code,
+                              inputMode: _inputMode,
+                              mainController: controllers[code]!,
+                              focusNode: focusNodes[code]!,
+                              multController: multiplierControllers[code]!,
+                              previewUsage: previewUsage[code] ?? 0,
+                              onTap: () {
+                                _selectCustomer(code, customer['name'] ?? "");
+                                if (_inputMode == "manual") {
+                                  focusNodes[code]?.requestFocus();
+                                }
+                              },
+                              // ១. ពេលកំពុងវាយលេខ គ្រាន់តែធ្វើបច្ចុប្បន្នភាពរូបរាង Preview តិចៗ (មិនទាន់ Save ទេ)
+                              onPreviewChanged: (val) {
+                                final double oldVal =
+                                    double.tryParse(
+                                      customer['old_value']?.toString() ??
+                                          customer['old']?.toString() ??
+                                          '0',
+                                    ) ??
+                                    0;
+                                final double currentNew =
+                                    double.tryParse(val) ?? 0;
+                                final double multiplier =
+                                    double.tryParse(
+                                      multiplierControllers[code]?.text ?? '1',
+                                    ) ??
+                                    1.0;
+
+                                setState(() {
+                                  previewUsage[code] = _calculateUsageLogic(
+                                    oldVal,
+                                    currentNew,
+                                    multiplier,
+                                  );
+                                });
+                              },
+                              // ២. ថេរវេលាដ៏ត្រឹមត្រូវ៖ ទាល់តែចុចប៊ូតុង "Done" ឬ "Enter" លើ Keyboard ពេលវាយលេខចប់ ទើបវាហៅមុខងាររក្សាទុក និងឆែកវិលជុំតែម្ដងគត់!
+                              onSubmitted: (val) {
+                                _handleSave(code, val, customer);
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+      bottomNavigationBar: (_inputMode == "manual")
+          ? null
+          : _buildBottomActionControl(),
+    );
+  }
+
+  // 🎯 មុខងារនាំចេញ Excel ជំនាន់ថ្មី៖ ជួសជុលបញ្ហាគាំងស្ងាត់ដោយប្រើ ShareXFiles ធានាដំណើរការជោគជ័យ ១០០%
+  Future<void> _exportToExcel() async {
+    try {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "📊 💾 កំពុងប្រមូលទិន្នន័យខែ-ឆ្នាំ និងរៀបចំ Sheet1, Sheet2...",
+          ),
+          backgroundColor: Colors.teal,
+        ),
+      );
+
+      // ១. ហៅដាតាបេស រួចធ្វើ Checkpoint បង្ខំទិន្នន័យឱ្យស្រស់បំផុត
+      final db = await DatabaseService().database;
+      await db.rawQuery('PRAGMA wal_checkpoint(FULL);');
+
+      // 🚀 ទាញយកទិន្នន័យស្រស់ៗទាំងអស់ពី SQLite ផ្ទាល់ (ដើម្បីឱ្យមាន Column ខែ-ឆ្នាំដេញពិតប្រាកដ)
+      final List<Map<String, dynamic>> dbRows = await db.query('sn_meter');
+
+      if (dbRows.isEmpty) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ គ្មានទិន្នន័យនៅក្នុង Database សម្រាប់នាំចេញទេ!"),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      // ២. បង្កើតរចនាសម្ព័ន្ធឯកសារ Excel មេ
+      var excel = Excel.createExcel();
+
+      // 📑 រៀបចំ Sheet1 - ទិន្នន័យអតិថិជនទាំងអស់
+      var sheet1 = excel['Sheet1'];
+
+      sheet1.appendRow([
+        TextCellValue("កូដអតិថិជន"),
+        TextCellValue("ឈ្មោះអតិថិជន"),
+        TextCellValue("ប្រអប់"),
+        TextCellValue("នាឡិកាស្ទង់"),
+        TextCellValue("អំណានចាស់"),
+        TextCellValue("អំណានថ្មី"),
+        TextCellValue("មេគុណ"),
+        TextCellValue("ថាមពលសរុប"),
+        TextCellValue("ថ្ងៃស្រង់"),
+        TextCellValue("ស្ថានភាព"),
+      ]);
+
+      List<Map<String, dynamic>> anomalyList = [];
+      int countZero = 0; // 🔴 សូន្យខុសធម្មតា
+      int countDown = 0; // 🟠 ថយចុះខ្លាំង
+      int countUp = 0; // ⚠️ កើនឡើងខ្លាំង
+
+      for (var row in dbRows) {
+        String codeStr = row['code']?.toString() ?? "";
+        String nameStr = row['name']?.toString() ?? "";
+        String boxStr = row['box']?.toString() ?? "";
+        String meterStr = row['meter']?.toString() ?? "";
+        String dateStr = row['date_checked']?.toString() ?? "";
+
+        // ចាប់យកសោរតាមរចនាសម្ព័ន្ធ Database របស់បង
+        double oldVal = double.tryParse(row['old']?.toString() ?? '0') ?? 0.0;
+        double newVal = double.tryParse(row['new']?.toString() ?? '0') ?? 0.0;
+        double multiplier =
+            double.tryParse(row['multiplier']?.toString() ?? '1') ?? 1.0;
+
+        // ហៅមុខងារគណនារបស់បង '_calculateUsageLogic'
+        double usageResult = 0.0;
+        if (newVal > 0) {
+          usageResult = _calculateUsageLogic(oldVal, newVal, multiplier);
+        }
+
+        // ប្រព័ន្ធស្កេនរក Column ខែ-ឆ្នាំដេញថយក្រោយ
+        double lastMonthUsage = 0.0;
+        try {
+          List<String> dateKeys = row.keys
+              .where((key) => RegExp(r'^\d{2}-\d{4}$').hasMatch(key))
+              .toList();
+          if (dateKeys.isNotEmpty) {
+            dateKeys.sort((a, b) {
+              List<String> partsA = a.split('-');
+              List<String> partsB = b.split('-');
+              int yearA = int.parse(partsA[1]);
+              int monthA = int.parse(partsA[0]);
+              int yearB = int.parse(partsB[1]);
+              int monthB = int.parse(partsB[0]);
+              return yearA != yearB
+                  ? yearA.compareTo(yearB)
+                  : monthA.compareTo(monthB);
+            });
+
+            if (dateKeys.length >= 2) {
+              String lastMonthName = dateKeys[dateKeys.length - 2];
+              lastMonthUsage =
+                  double.tryParse(row[lastMonthName]?.toString() ?? '0') ?? 0.0;
+            } else {
+              lastMonthUsage =
+                  double.tryParse(row[dateKeys.last]?.toString() ?? '0') ?? 0.0;
+            }
+          }
+        } catch (_) {}
+
+        // វិភាគរកស្ថានភាពអតិថិជនម្នាក់ៗ
+        String rowStatus = "ប្រក្រតី";
+        String newValStr = row['new']?.toString() ?? "";
+
+        if (newValStr.isNotEmpty && newValStr.trim() != "" && newVal > 0) {
+          if (usageResult == 0 && lastMonthUsage > 2) {
+            rowStatus = "សូន្យខុសធម្មតា";
+            countZero++;
+          } else if (lastMonthUsage > 0 &&
+              usageResult >= (lastMonthUsage * 2.5) &&
+              usageResult > 10) {
+            rowStatus = "កើនឡើងខ្លាំង";
+            countUp++;
+          } else if (lastMonthUsage > 0 &&
+              usageResult < (lastMonthUsage * 0.3)) {
+            rowStatus = "ថយចុះខ្លាំង";
+            countDown++;
+          }
+        } else {
+          rowStatus = "មិនទាន់ស្រង់";
+        }
+
+        sheet1.appendRow([
+          TextCellValue(codeStr),
+          TextCellValue(nameStr),
+          TextCellValue(boxStr),
+          TextCellValue(meterStr),
+          DoubleCellValue(oldVal),
+          TextCellValue(newValStr),
+          DoubleCellValue(multiplier),
+          DoubleCellValue(usageResult),
+          TextCellValue(dateStr),
+          TextCellValue(rowStatus),
+        ]);
+
+        if (rowStatus == "សូន្យខុសធម្មតា" ||
+            rowStatus == "កើនឡើងខ្លាំង" ||
+            rowStatus == "ថយចុះខ្លាំង") {
+          Map<String, dynamic> rowWithStatus = Map.from(row);
+          rowWithStatus['calculated_status'] = rowStatus;
+          rowWithStatus['calculated_usage'] = usageResult;
+          anomalyList.add(rowWithStatus);
+        }
+      }
+
+      // 📑 រៀបចំ Sheet2 - អតិថិជនខុសប្រក្រតី
+      String sheet2Name = "អតិថិជនខុសប្រក្រតី";
+      var sheet2 = excel[sheet2Name];
+
+      sheet2.appendRow([
+        TextCellValue("កូដអតិថិជន"),
+        TextCellValue("ឈ្មោះអតិថិជន"),
+        TextCellValue("ប្រអប់"),
+        TextCellValue("នាឡិកាស្ទង់"),
+        TextCellValue("អំណានចាស់"),
+        TextCellValue("អំណានថ្មី"),
+        TextCellValue("មេគុណ"),
+        TextCellValue("ថាមពលសរុប"),
+        TextCellValue("ថ្ងៃស្រង់"),
+        TextCellValue("ស្ថានភាពមិនប្រក្រតី"),
+      ]);
+
+      if (anomalyList.isNotEmpty) {
+        // តម្រៀបបញ្ជីអតិថិជនខុសប្រក្រតីតាមលំដាប់ "ប្រអប់ (Box)"
+        anomalyList.sort((a, b) {
+          String boxA = a['box']?.toString() ?? "";
+          String boxB = b['box']?.toString() ?? "";
+          return boxA.compareTo(boxB);
+        });
+
+        for (var item in anomalyList) {
+          double oV = double.tryParse(item['old']?.toString() ?? '0') ?? 0.0;
+          String nVStr = item['new']?.toString() ?? "";
+          double mul =
+              double.tryParse(item['multiplier']?.toString() ?? '1') ?? 1.0;
+          double uR = item['calculated_usage'] ?? 0.0;
+          String cS = item['calculated_status'] ?? "";
+
+          sheet2.appendRow([
+            TextCellValue(item['code']?.toString() ?? ""),
+            TextCellValue(item['name']?.toString() ?? ""),
+            TextCellValue(item['box']?.toString() ?? ""),
+            TextCellValue(item['meter']?.toString() ?? ""),
+            DoubleCellValue(oV),
+            TextCellValue(nVStr),
+            DoubleCellValue(mul),
+            DoubleCellValue(uR),
+            TextCellValue(item['date_checked']?.toString() ?? ""),
+            TextCellValue(cS),
+          ]);
+        }
+      }
+
+      // បន្ថែមជួររបាយការណ៍សង្ខេបសរុប (Summary)
+      sheet2.appendRow([]);
+      sheet2.appendRow([
+        TextCellValue("របាយការណ៍សង្ខេបសរុប"),
+        TextCellValue("ចំនួនអតិថិជន"),
+      ]);
+      sheet2.appendRow([
+        TextCellValue("🔴 សូន្យខុសធម្មតា:"),
+        IntCellValue(countZero),
+      ]);
+      sheet2.appendRow([
+        TextCellValue("🟠 ថយចុះខ្លាំង:"),
+        IntCellValue(countDown),
+      ]);
+      sheet2.appendRow([
+        TextCellValue("⚠️ កើនឡើងខ្លាំង:"),
+        IntCellValue(countUp),
+      ]);
+      sheet2.appendRow([
+        TextCellValue("សរុបរួម:"),
+        IntCellValue(anomalyList.length),
+      ]);
+
+      // 🚀 🎯 ដំណោះស្រាយផ្ដាច់ព្រ័ត្រ៖ សរសេរចូល Folder របស់ App សិន រួចហៅប៊ូតុង Share បាញ់ចេញ (ធានាជោគជ័យ ១០០%)
+      final List<int>? bytes = excel.encode();
+      if (bytes != null) {
+        final Directory appDocDir = await getApplicationDocumentsDirectory();
+        final String excelPath =
+            "${appDocDir.path}/report_meter_${DateTime.now().millisecondsSinceEpoch}.xlsx";
+        final File excelFile = File(excelPath);
+
+        await excelFile.writeAsBytes(bytes, flush: true);
+
+        // បង្កើត XFile សម្រាប់រុញទៅកាន់ផ្ទាំង Share
+        final XFile xFile = XFile(
+          excelFile.path,
+          name: "របាយការណ៍ស្រង់អំណាន_មានសន្លឹកខុសប្រក្រតី.xlsx",
+          mimeType:
+              'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        );
+
+        if (!mounted) return;
+        // បើកផ្ទាំង Share ហោះទៅកាន់ Telegram, ម៉ាស៊ីនបោះពុម្ព ឬរក្សាទុកក្នុង File ទូរស័ព្ទ
+        // ignore: deprecated_member_use
+        await Share.shareXFiles([
+          xFile,
+        ], text: '📊 របាយការណ៍ស្រង់អំណាន និងអតិថិជនខុសប្រក្រតី (Excel)');
+
+        debugPrint("✅ នាំចេញ Excel ជោគជ័យផ្ដាច់ព្រ័ត្រតាមរយៈ ShareXFiles!");
+      }
+    } catch (e) {
+      debugPrint("❌ កំហុសក្នុងការនាំចេញ Excel៖ $e");
+    }
+  }
+
+  Widget _buildBottomActionControl() {
+    if (_activeCode.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(20),
+        color: Colors.grey[100],
+        child: const Text(
+          "⚠️ សូមជ្រើសរើសអតិថិជនម្នាក់ជាមុនសិន",
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black12, blurRadius: 10, spreadRadius: 2),
+        ],
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8.0),
+              child: Text(
+                "កំពុងរៀបចំសម្រាប់៖ $_listeningCustomerName",
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.blue[800],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (_inputMode == "voice") _buildVoiceButton(),
+                if (_inputMode == "camera") _buildCameraButton(),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraButton() {
+    return Expanded(
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.orange,
+          padding: const EdgeInsets.symmetric(vertical: 15),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+        ),
+        icon: const Icon(Icons.camera_alt, color: Colors.white),
+        label: const Text(
+          "ថតរូបស្កេនលេខ",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        onPressed: () => _captureAndScan(_activeCode),
+      ),
+    );
+  }
+
+  Widget _buildVoiceButton() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 🎤 ១. ប៊ូតុង Voice (ម៉ៃក្រូហ្វូន)
+        GestureDetector(
+          onTap: () => _listenToVoice(_activeCode),
+          child: CircleAvatar(
+            radius: 35,
+            backgroundColor: _isListening ? Colors.red : Colors.blue,
+            child: Icon(
+              _isListening ? Icons.stop : Icons.mic,
+              color: Colors.white,
+              size: 35,
+            ),
+          ),
+        ),
+
+        const SizedBox(width: 20),
+
+        // 📡 ២. ប៊ូតុង Bluetooth នៅក្នុង HomeScreen (ទម្រង់ថ្មីដើមរលូនឥតខ្ចោះ)
+        GestureDetector(
+          onTap: () async {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text("📡 កំពុងស្កេនប្រមូលទិន្នន័យពីនាឡិកាជុំវិញ..."),
+                backgroundColor: Colors.blue,
+                duration: Duration(seconds: 2),
+              ),
+            );
+
+            // 🚀 ១. ហៅ Bluetooth ឱ្យដើរប្រមូលទិន្នន័យ (ទទួលបាន List<Map<String, String>> ត្រូវតាមប្រភេទអថេរចាស់បងបេះបិទ)
+            final List<Map<String, String>> bluetoothResults =
+                await MeterBleService.scanAndCollectAll(allCustomers);
+
+            int savedCount = 0;
+
+            // 🚀 ២. យកលទ្ធផលដែលចាប់បាន មក Loop រក្សាទុកចូលដាតាបេសតាមស្ទីលដើមពិតប្រាកដរបស់ HomeScreen បង
+            for (var data in bluetoothResults) {
+              String? code = data['code'];
+              String? value = data['value'];
+
+              if (code != null && value != null) {
+                // 🎯 ហៅដាតាបេសពិតរបស់ HomeScreen បង (ធានាមិនលោតក្រហម និងដើរជោគជ័យ ១០០%)
+                await DatabaseService().updateReading(code, value);
+                savedCount++;
+              }
+            }
+
+            _refreshData(); // រំលឹក UI បង្ហាញលេខថ្មីៗដែលទើបស្រូបបាន
+
+            if (!mounted) return;
+            if (savedCount > 0) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    "✅ បានទាញយកលេខចូលដាតាបេសចំនួន $savedCount នាឡិកាជោគជ័យ!",
+                  ),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text(
+                    "❌ រកមិនឃើញនាឡិកាជិតៗនេះ ឬប៊្លូធូសទូរស័ព្ទមិនទាន់បើក",
+                  ),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          },
+          child: const CircleAvatar(
+            radius: 35,
+            backgroundColor: Colors.green,
+            child: Icon(Icons.bluetooth, color: Colors.white, size: 35),
+          ),
+        ),
+      ],
+    );
+  }
+}

@@ -1,0 +1,157 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+import 'package:path_provider/path_provider.dart'; // 💡 ធានាថាមានបណ្ណាល័យនេះ
+
+class DatabaseService {
+  static final DatabaseService _instance = DatabaseService._internal();
+  factory DatabaseService() => _instance;
+  DatabaseService._internal();
+
+  Database? _database;
+
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDb();
+    return _database!;
+  }
+
+  // 💡 កែសម្រួលធំ៖ ប្តូរផ្លូវរក្សាទុកមកកាន់ External Storage ដែលអាចឱ្យមុខងារ Share ចាប់ផ្ញើទៅ Telegram បានលេខពិត ១០០%
+  Future<Database> _initDb() async {
+    String path = await getDatabasePath();
+    bool exists = await databaseExists(path);
+
+    if (!exists) {
+      debugPrint("កំពុងចម្លង Database ពី Assets មកកាន់ផ្លូវបើកចំហរ...");
+      try {
+        await Directory(dirname(path)).create(recursive: true);
+        ByteData data = await rootBundle.load(join("assets", "sn_meter.db"));
+        List<int> bytes = data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
+        await File(path).writeAsBytes(bytes, flush: true);
+        debugPrint("ចម្លងជោគជ័យដាច់ណាត់!");
+      } catch (e) {
+        debugPrint("កំហុសក្នុងការចម្លង Database: $e");
+      }
+    }
+
+    Database db = await openDatabase(path, version: 1);
+    await _checkAndAddMultiplierColumn(db);
+    return db;
+  }
+
+  // 💡 🎯 មុខងារគន្លឹះ៖ កំណត់ផ្លូវឯកសារឱ្យស្ថិតនៅកន្លែងដែលអាច Share ចេញបាន ១០០%
+  Future<String> getDatabasePath() async {
+    Directory? extDir = await getExternalStorageDirectory();
+    if (extDir == null) {
+      // បើទូរស័ព្ទគ្មាន External គឺដកថយមកប្រើផ្លូវធម្មតា
+      String databasesPath = await getDatabasesPath();
+      return join(databasesPath, "sn_meter.db");
+    }
+    // រក្សាទុកក្នុង Folder Android/data/com.example.../files/sn_meter.db (ផ្លូវនេះ Share បានភ្លាម)
+    return join(extDir.path, "sn_meter.db");
+  }
+
+  Future<void> importDatabase(File pickedFile) async {
+    String path = await getDatabasePath();
+
+    if (_database != null) {
+      await _database!.close();
+      _database = null;
+    }
+
+    await pickedFile.copy(path);
+    Database db = await database;
+    await _checkAndAddMultiplierColumn(db);
+  }
+
+  Future<void> _checkAndAddMultiplierColumn(Database db) async {
+    try {
+      var columns = await db.rawQuery("PRAGMA table_info(sn_meter)");
+      bool hasMultiplier = columns.any(
+        (column) => column['name'] == 'multiplier',
+      );
+
+      if (!hasMultiplier) {
+        await db.execute(
+          "ALTER TABLE sn_meter ADD COLUMN multiplier REAL DEFAULT 1",
+        );
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការបន្ថែម Column: $e");
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getCustomers() async {
+    final db = await database;
+    try {
+      final List<Map<String, dynamic>> res = await db.query('sn_meter');
+
+      return res.map((item) {
+        final newItem = Map<String, dynamic>.from(item);
+
+        if (newItem.containsKey('old') && !newItem.containsKey('old_value')) {
+          newItem['old_value'] = newItem['old'];
+        } else if (newItem.containsKey('old_value') &&
+            !newItem.containsKey('old')) {
+          newItem['old'] = newItem['old_value'];
+        }
+
+        String currentNewVal = "";
+        if (newItem['new'] != null) {
+          String rawNew = newItem['new'].toString().trim();
+          if (rawNew.isNotEmpty && rawNew != "0" && rawNew != "0.0") {
+            currentNewVal = rawNew;
+          }
+        }
+
+        newItem['new_value'] = currentNewVal;
+        newItem['new'] = currentNewVal;
+
+        return newItem;
+      }).toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // 💡 បង្ខំបុកចូល Column 'new' ជាប្រភេទលេខមានក្បៀស (REAL) ចំៗ
+  Future<int> updateReading(String code, String newValue) async {
+    final db = await database;
+    try {
+      final String trimmed = newValue.trim();
+      final double numericValue = double.tryParse(trimmed) ?? 0.0;
+
+      int count = await db.rawUpdate(
+        "UPDATE sn_meter SET new = ? WHERE code = ?",
+        [numericValue, code],
+      );
+
+      debugPrint("💾 [RAW UPDATE SUCCESS] Code: $code, Value: $numericValue");
+      return count;
+    } catch (e) {
+      debugPrint("❌ Error: $e");
+      return 0;
+    }
+  }
+
+  Future<int> resetNewReadings() async {
+    final db = await database;
+    var columns = await db.rawQuery("PRAGMA table_info(sn_meter)");
+    List<String> columnNames = columns
+        .map((e) => e['name'].toString())
+        .toList();
+
+    int count = 0;
+    await db.rawUpdate("UPDATE sn_meter SET multiplier = 1");
+
+    if (columnNames.contains('new')) {
+      count += await db.rawUpdate("UPDATE sn_meter SET new = NULL");
+    }
+    return count;
+  }
+}

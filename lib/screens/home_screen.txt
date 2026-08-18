@@ -1,0 +1,963 @@
+import 'dart:io';
+import 'dart:ui' as ui; // 💡 ត្រូវប្រាកដថាមានបន្ទាត់នេះ
+import 'package:flutter/services.dart';
+import 'package:share_plus/share_plus.dart'; // 💡 ប្រើប្រាស់បណ្ណាល័យ Share ផ្លូវការ
+import 'package:path_provider/path_provider.dart';
+import 'package:image_cropper/image_cropper.dart';
+import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:image_picker/image_picker.dart';
+import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
+import '../database_service.dart';
+import '../widgets/app_drawer.dart';
+import '../widgets/filter_area.dart';
+import '../widgets/customer_card.dart';
+
+class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  List<Map<String, dynamic>> allCustomers = [];
+  List<Map<String, dynamic>> filteredCustomers = [];
+  bool isLoading = true;
+  bool isSearching = false;
+  bool _isRolloverWarning =
+      false; // 💡 សម្រាប់ឆែកមើលថាត្រូវបង្ហាញសារព្រមានវិលជុំលើ AppBar ដែរឬទេ
+  String _warningMessage = ""; // 💡 សម្រាប់ផ្ទុកអក្សរសារព្រមាន
+
+  late stt.SpeechToText _speech;
+  bool _isListening = false;
+  String _activeCode = "";
+  String _inputMode = "manual";
+  String _listeningCustomerName = "";
+
+  final TextEditingController searchController = TextEditingController();
+  final Map<String, TextEditingController> controllers = {};
+  final Map<String, FocusNode> focusNodes = {};
+  final Map<String, TextEditingController> multiplierControllers = {};
+  final Map<String, double> previewUsage = {};
+
+  final textRecognizer = TextRecognizer(script: TextRecognitionScript.latin);
+
+  int totalCount = 0;
+  int doneCount = 0;
+
+  String? selectedArea;
+  String? selectedPole;
+  String? selectedBox;
+
+  @override
+  void initState() {
+    super.initState();
+    _speech = stt.SpeechToText();
+    _refreshData();
+  }
+
+  @override
+  void dispose() {
+    textRecognizer.close();
+    searchController.dispose();
+    for (var c in controllers.values) {
+      c.dispose();
+    }
+    for (var f in focusNodes.values) {
+      f.dispose();
+    }
+    for (var m in multiplierControllers.values) {
+      m.dispose();
+    }
+    super.dispose();
+  }
+
+  String _convertToArabicNumbers(String input) {
+    const Map<String, String> khmerToArabic = {
+      'សូន្យ': '0',
+      'មួយ': '1',
+      'ពីរ': '2',
+      'បី': '3',
+      'បួន': '4',
+      'ប្រាំ': '5',
+      'ប្រាំមួយ': '6',
+      'ប្រាំពីរ': '7',
+      'ប្រាំបួន': '9',
+      '១': '1',
+      '២': '2',
+      '៣': '3',
+      '៤': '4',
+      '៥': '5',
+      '៦': '6',
+      '៧': '7',
+      '៨': '8',
+      '៩': '9',
+      '០': '0',
+      'ចុច': '.',
+      'ដក់': '.',
+    };
+    String result = input;
+    khmerToArabic.forEach((kh, ar) => result = result.replaceAll(kh, ar));
+    return result.replaceAll(RegExp(r'[^0-9.]'), '');
+  }
+
+  void _listenToVoice(String code) async {
+    bool available = await _speech.initialize();
+    if (available) {
+      setState(() {
+        _isListening = true;
+        _activeCode = code;
+      });
+      _speech.listen(
+        localeId: "km_KH",
+        onResult: (result) {
+          String cleanNumber = _convertToArabicNumbers(result.recognizedWords);
+          if (cleanNumber.isNotEmpty) {
+            setState(() {
+              controllers[code]?.text = cleanNumber;
+              _updatePreview(code, cleanNumber);
+            });
+            // 💡 ថែមបន្ទាត់នេះ៖ ឱ្យវា Auto-Save ចូល DB ភ្លាមៗពេលឮសំឡេងលេខ
+            final cust = filteredCustomers.firstWhere(
+              (e) => e['code'].toString() == code,
+            );
+            _handleSave(code, controllers[code]?.text ?? "", cust);
+          }
+        },
+      );
+    }
+    Future.delayed(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _isListening = false);
+    });
+  }
+
+  // ១. មុខងារថតរូប រក្សាទុក និងដៅឈ្មោះអតិថិជនលើរូបភាព (Watermark)
+  // 💡 មុខងារថតរូប និងកាត់តម្រង់ជ្រើសរើសដុំលេខដោយខ្លួនឯងផ្ទាល់ (Manual ROI Selection)
+  Future<void> _captureAndScan(String code) async {
+    final ImagePicker picker = ImagePicker();
+    final XFile? image = await picker.pickImage(
+      source: ImageSource.camera,
+      imageQuality: 100, // យកច្បាស់ល្អបំផុត
+    );
+
+    if (image == null) return;
+
+    try {
+      // 🎯 លុប SystemChrome លាក់របារខាងលើចោល ដើម្បីឱ្យកាមេរ៉ាដំណើរការជាធម្មតាឡើងវិញ ១០០%
+      final CroppedFile? croppedFile = await ImageCropper().cropImage(
+        sourcePath: image.path,
+        uiSettings: [
+          AndroidUiSettings(
+            toolbarTitle: '🎯 សូមអូសតម្រង់លើដុំលេខកុងទ័រ',
+            toolbarColor: Colors.blue,
+            toolbarWidgetColor: Colors.white,
+            initAspectRatio: CropAspectRatioPreset.original,
+            lockAspectRatio: false,
+          ),
+          IOSUiSettings(title: '🎯 សូមអូសតម្រង់លើដុំលេខកុងទ័រ'),
+        ],
+      );
+
+      if (croppedFile == null) return;
+
+      // 🔍 យកដុំរូបភាពដែលកាត់រួច ទៅរត់ចូលម៉ាស៊ីន OCR
+      final inputImage = InputImage.fromFilePath(croppedFile.path);
+      final RecognizedText recognizedText = await textRecognizer.processImage(
+        inputImage,
+      );
+
+      String finalNumber = "";
+      for (final block in recognizedText.blocks) {
+        for (final line in block.lines) {
+          String clean = line.text.replaceAll(RegExp(r'[^0-9.]'), '');
+          if (clean.isNotEmpty) {
+            finalNumber = clean;
+            break;
+          }
+        }
+        if (finalNumber.isNotEmpty) break;
+      }
+
+      if (finalNumber.isEmpty && recognizedText.text.trim().isNotEmpty) {
+        finalNumber = recognizedText.text.trim().replaceAll(
+          RegExp(r'[^0-9.]'),
+          '',
+        );
+      }
+
+      if (finalNumber.isNotEmpty) {
+        setState(() {
+          controllers[code]?.text = finalNumber;
+          _updatePreview(code, finalNumber);
+        });
+
+        final cust = allCustomers.firstWhere(
+          (e) => e['code'].toString() == code,
+        );
+        // រក្សាទុកស្ងាត់ៗចូល DB ភ្លាមៗ (មិនបាច់ឆ្លងកាត់ផ្ទាំងសួរនាំវិលជុំទេ ព្រោះថតរូបឃើញនឹងភ្នែកហើយ)
+        await DatabaseService().updateReading(code, finalNumber);
+
+        final double oldVal =
+            double.tryParse(
+              cust['old_value']?.toString() ?? cust['old']?.toString() ?? '0',
+            ) ??
+            0;
+        final double currentNew = double.tryParse(finalNumber) ?? 0;
+        final double multiplier =
+            double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+        setState(() {
+          cust['new_value'] = finalNumber;
+          cust['new'] = finalNumber;
+          previewUsage[code] = _calculateUsageLogic(
+            oldVal,
+            currentNew,
+            multiplier,
+          );
+        });
+
+        runFilter();
+
+        if (!mounted) return;
+        _askToSaveImageWithWatermark(
+          context,
+          File(image.path),
+          code,
+          cust['name'] ?? "Unknown",
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ ស្កេនរកមិនឃើញលេខទេ! សូមព្យាយាមម្ដងទៀត"),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការថត៖ $e");
+    }
+  }
+
+  // 💡 មុខងារកែសម្រួល៖ រក្សាទុករូបភាពចូលទៅក្នុង Folder ផ្លូវការរបស់ទូរស័ព្ទ (Pictures/Meter_Readings)
+  void _askToSaveImageWithWatermark(
+    BuildContext context,
+    File originalFile,
+    String code,
+    String customerName,
+  ) async {
+    final bool? wantToSave = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.add_photo_alternate, color: Colors.orange),
+            SizedBox(width: 10),
+            Text("រក្សាទុករូបភាព"),
+          ],
+        ),
+        content: const Text(
+          "តើអ្នកចង់រក្សាទុករូបភាពនាឡិកាស្ទង់នេះ ចូលទៅក្នុងទូរស័ព្ទដែរឬទេ?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("ទេ"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text(
+              "រក្សាទុក",
+              style: TextStyle(fontWeight: FontWeight.bold, color: Colors.blue),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (wantToSave == true) {
+      try {
+        final Uint8List imageBytes = await originalFile.readAsBytes();
+        final ui.Codec codec = await ui.instantiateImageCodec(imageBytes);
+        final ui.FrameInfo frameInfo = await codec.getNextFrame();
+        final ui.Image uiImage = frameInfo.image;
+
+        final ui.PictureRecorder recorder = ui.PictureRecorder();
+        final Canvas canvas = Canvas(recorder);
+        final Paint paint = Paint();
+
+        canvas.drawImage(uiImage, Offset.zero, paint);
+
+        final textPainter = TextPainter(
+          text: TextSpan(
+            text:
+                "អតិថិជន៖ $customerName ($code)\nថ្ងៃទី៖ ${DateTime.now().toString().split('.')[0]}",
+            style: TextStyle(
+              color: Colors.yellow,
+              fontSize: uiImage.width * 0.035,
+              fontWeight: FontWeight.bold,
+              backgroundColor: Colors.black.withValues(alpha: 0.5),
+            ),
+          ),
+          textDirection: TextDirection.ltr,
+        );
+
+        textPainter.layout();
+        textPainter.paint(canvas, Offset(30, 30));
+
+        final ui.Picture picture = recorder.endRecording();
+        final ui.Image imgWithWatermark = await picture.toImage(
+          uiImage.width,
+          uiImage.height,
+        );
+        final ByteData? byteData = await imgWithWatermark.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+
+        if (byteData != null) {
+          final Uint8List finalBytes = byteData.buffer.asUint8List();
+
+          // 💡 ដំណោះស្រាយរកទីតាំង៖ បង្កើតផ្លូវផ្ទុកទៅកាន់ Folder "Pictures" ផ្លូវការរបស់ទូរស័ព្ទ Android/iOS
+          // រូបភាពនឹងលោតចូលទៅក្នុង App Gallery ឬ App Photos ភ្លាមៗ
+          final Directory? externalDir =
+              await getExternalStorageDirectory(); // មកពីបណ្ណាល័យ path_provider
+          String picturesPath = "/storage/emulated/0/Pictures/Meter_Readings";
+
+          // ប្រសិនបើជាទូរស័ព្ទជំនាន់ថ្មី ឬ iOS វានឹងយកផ្លូវស្តង់ដារ
+          if (externalDir != null) {
+            final Directory saveDir = Directory(picturesPath);
+            if (!await saveDir.exists()) {
+              await saveDir.create(
+                recursive: true,
+              ); // បង្កើត Folder ថ្មីបើមិនទាន់មាន
+            }
+
+            // ដាក់ឈ្មោះ File តាម៖ កូដអតិថិជន_ថ្ងៃខែឆ្នាំ.png (ដើម្បីកុំឱ្យជាន់គ្នា)
+            String fileName =
+                "${code}_${DateTime.now().millisecondsSinceEpoch}.png";
+            File finalSavedFile = File("${saveDir.path}/$fileName");
+
+            await finalSavedFile.writeAsBytes(finalBytes);
+
+            if (!context.mounted) return;
+            // បង្ហាញប្រាប់អ្នកប្រើប្រាស់ពីទីតាំងពិតប្រាកដដែលបានរក្សាទុក
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  "📸 បានរក្សាទុកក្នុង៖ Pictures/Meter_Readings/$fileName",
+                ),
+                backgroundColor: Colors.green,
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint("Error saving image: $e");
+      }
+    }
+  }
+
+  // 💡 កែសម្រួលដាច់ណាត់៖ ប្រើប្រាស់ Share.shareXFiles ជំនាន់ស្ថិរភាព ដើម្បីបង្ខំលោតផ្ទាំងផ្ញើទៅ Telegram ភ្លាមៗ
+  Future<void> _exportDatabase() async {
+    try {
+      // ១. ទាញយកផ្លូវ File .db ពិតប្រាកដដែលមានលេខ ២៨០៥ និង ៥៨០ ក្នុងទូរស័ព្ទ
+      final String dbPath = await DatabaseService().getDatabasePath();
+      final File sourceFile = File(dbPath);
+
+      if (await sourceFile.exists()) {
+        if (!mounted) return;
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("🚀 កំពុងបើកផ្ទាំងផ្ញើទៅកាន់ Telegram..."),
+            backgroundColor: Colors.blue,
+            duration: Duration(milliseconds: 800),
+          ),
+        );
+
+        // ២. បង្កើត XFile ដោយប្តូរ mimeType ទៅជា 'application/octet-stream'
+        // ដើម្បីកុំឱ្យប្រព័ន្ធ Android ច្រឡំថាជា File ZIP ឬលោតពាក្យ Extract ទៀត
+        final XFile xFile = XFile(
+          sourceFile.path,
+          name: "sn_meter.db",
+          mimeType: 'application/octet-stream',
+        );
+
+        // 🚀 បញ្ជាលោតផ្ទាំង Share Sheet ផ្លូវការរបស់ទូរស័ព្ទភ្លាមៗ (លែងជាប់គាំង Open with ទៀតហើយ)
+        await Share.shareXFiles([
+          xFile,
+        ], text: 'ទិន្នន័យស្រង់អំណាននាឡិកា (sn_meter.db)');
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("❌ រកមិនឃើញឯកសារដាតាបេសពិតទេ!"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint("កំហុសក្នុងការ Export Share: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("❌ មិនអាចផ្ញើចេញបានទេ៖ $e"),
+          backgroundColor: Colors.orange,
+        ),
+      );
+    }
+  }
+
+  Future<void> _handleImport() async {
+    bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("នាំចូលទិន្នន័យខែថ្មី"),
+        content: const Text(
+          "ការនាំចូលនឹងលុបទិន្នន័យបច្ចុប្បន្នចោលទាំងអស់។ តើអ្នកប្រាកដទេ?",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text("បោះបង់"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text("យល់ព្រម"),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+    );
+    if (result != null) {
+      File file = File(result.files.single.path!);
+      try {
+        await DatabaseService().importDatabase(file);
+        await _refreshData();
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("នាំចូលទិន្នន័យជោគជ័យ!"),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("ការនាំចូលបរាជ័យ: $e"),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    }
+  }
+
+  double _calculateUsageLogic(
+    double oldValue,
+    double newValue,
+    double multiplier,
+  ) {
+    if (newValue >= oldValue) {
+      return (newValue - oldValue) * multiplier;
+    } else {
+      return ((100000 - oldValue) + newValue) * multiplier;
+    }
+  }
+
+  void _updatePreview(String code, String value) {
+    final newVal = double.tryParse(value) ?? 0;
+    final cust = allCustomers.firstWhere((e) => e['code'].toString() == code);
+    final oldVal = double.tryParse(cust['old_value']?.toString() ?? '0') ?? 0;
+    final multiplier =
+        double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+    setState(() {
+      previewUsage[code] = _calculateUsageLogic(oldVal, newVal, multiplier);
+    });
+  }
+
+  Future<void> _handleSave(
+    String code,
+    String value,
+    Map<String, dynamic> cust,
+  ) async {
+    // 💡 ១. ចាប់យកអត្ថបទស្រស់ៗដែលបងបានវាយឃើញនឹងភ្នែកចេញពីប្រអប់បញ្ចូល (Controller)
+    final String actualValue = controllers[code]?.text ?? "";
+
+    // បើប្រអប់ទទេ មិនបាច់ធ្វើអ្វីឡើយ
+    if (actualValue.isEmpty) return;
+
+    final double? currentNew = double.tryParse(actualValue);
+    if (currentNew == null) return;
+
+    final double oldVal =
+        double.tryParse(
+          cust['old_value']?.toString() ?? cust['old']?.toString() ?? '0',
+        ) ??
+        0;
+
+    final double multiplier =
+        double.tryParse(multiplierControllers[code]?.text ?? '1') ?? 1.0;
+
+    // ឆែកលក្ខខណ្ឌបង្ហាញសារព្រមានលើ AppBar បើមានការវិលជុំ
+    if (currentNew < oldVal && currentNew > 0) {
+      setState(() {
+        _isRolloverWarning = true;
+        _warningMessage =
+            "⚠️ លេខថ្មី ($currentNew) តូចជាងលេខចាស់ ($oldVal)៖ ប្រព័ន្ធគណនាជាការវិលជុំ!";
+      });
+    } else {
+      setState(() {
+        _isRolloverWarning = false;
+      });
+    }
+
+    // 🚀 ២. បុកបញ្ជាទៅកាន់ DatabaseService ដោយបញ្ជូន actualValue (ឧ. "10" ឬ "100") ទៅរក្សាទុកភ្លាមៗ
+    final int result = await DatabaseService().updateReading(code, actualValue);
+    if (!mounted) return;
+
+    if (result > 0) {
+      final double usageResult = _calculateUsageLogic(
+        oldVal,
+        currentNew,
+        multiplier,
+      );
+
+      setState(() {
+        // 🎯 ចាក់សោតម្លៃ៖ រក្សាទុកតម្លៃជាប្រភេទ String នៅក្នុង State UI ដើម្បីឱ្យប្រអប់បញ្ចូលបង្ហាញលេខត្រឹមត្រូវ
+        cust['new_value'] = actualValue;
+        cust['new'] = actualValue;
+        previewUsage[code] = usageResult;
+      });
+
+      // 📊 រាប់ស្ថិតិឡើងវិញ
+      runFilter();
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("✅ បានរក្សាទុកលេខ [$actualValue] ចូលដាតាបេសជោគជ័យ!"),
+          backgroundColor: Colors.green,
+          duration: const Duration(seconds: 1),
+        ),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text("❌ មិនអាចរក្សាទុកចូលដាតាបេសបានទេ!"),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  //     // 🔔 បង្ហាញផ្ទាំង SnackBar ប្រាប់លទ្ធផលជោគជ័យ
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(
+  //         content: Text(
+  //           "រក្សាទុកជោគជ័យ! ប្រើប្រាស់: ${usageResult.toStringAsFixed(2)}",
+  //         ),
+  //         backgroundColor: Colors.green,
+  //         duration: const Duration(seconds: 2),
+  //       ),
+  //     );
+  //   } else {
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       const SnackBar(
+  //         content: Text("❌ មិនអាចរក្សាទុកចូលដាតាបេសបានទេ!"),
+  //         backgroundColor: Colors.red,
+  //       ),
+  //     );
+  //   }
+  // }
+
+  List<String> get availableAreas =>
+      allCustomers
+          .map((e) => e['area']?.toString() ?? "")
+          .where((e) => e.isNotEmpty)
+          .toSet()
+          .toList()
+        ..sort();
+  List<String> get availablePoles {
+    var list = allCustomers;
+    if (selectedArea != null) {
+      list = list.where((e) => e['area'] == selectedArea).toList();
+    }
+    return list
+        .map((e) => e['pole']?.toString() ?? "")
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  List<String> get availableBoxes {
+    var list = allCustomers;
+    if (selectedArea != null) {
+      list = list.where((e) => e['area'] == selectedArea).toList();
+    }
+    if (selectedPole != null) {
+      list = list.where((e) => e['pole'] == selectedPole).toList();
+    }
+    return list
+        .map((e) => e['box']?.toString() ?? "")
+        .where((e) => e.isNotEmpty)
+        .toSet()
+        .toList()
+      ..sort();
+  }
+
+  Future<void> _refreshData() async {
+    setState(() => isLoading = true);
+    final data = await DatabaseService().getCustomers();
+
+    for (var cust in data) {
+      String code = cust['code'].toString();
+      String currentNewVal =
+          cust['new_value']?.toString() ?? cust['new']?.toString() ?? "";
+
+      if (!controllers.containsKey(code)) {
+        controllers[code] = TextEditingController(text: currentNewVal);
+      } else {
+        controllers[code]!.text = currentNewVal;
+      }
+      if (!focusNodes.containsKey(code)) {
+        focusNodes[code] = FocusNode();
+      }
+
+      if (!multiplierControllers.containsKey(code)) {
+        String mVal = cust['multiplier']?.toString() ?? "1";
+        multiplierControllers[code] = TextEditingController(text: mVal);
+      }
+
+      if (currentNewVal.isNotEmpty) {
+        final nv = double.tryParse(currentNewVal) ?? 0;
+        final ov = double.tryParse(cust['old_value']?.toString() ?? '0') ?? 0;
+        final m = double.tryParse(cust['multiplier']?.toString() ?? '1') ?? 1.0;
+        previewUsage[code] = _calculateUsageLogic(ov, nv, m);
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        allCustomers = data;
+        isLoading = false;
+        runFilter();
+      });
+    }
+  }
+
+  void runFilter() {
+    List<Map<String, dynamic>> results = allCustomers;
+    String query = searchController.text.toLowerCase();
+
+    if (query.isNotEmpty) {
+      results = results.where((c) {
+        return c['name'].toString().toLowerCase().contains(query) ||
+            c['meter'].toString().toLowerCase().contains(query);
+      }).toList();
+    }
+
+    if (selectedArea != null) {
+      results = results.where((c) => c['area'] == selectedArea).toList();
+    }
+    if (selectedPole != null) {
+      results = results.where((c) => c['pole'] == selectedPole).toList();
+    }
+    if (selectedBox != null) {
+      results = results.where((c) => c['box'] == selectedBox).toList();
+    }
+
+    setState(() {
+      filteredCustomers = results;
+      totalCount = allCustomers.length;
+      doneCount = allCustomers.where((item) {
+        // ✅ ឆែករកទាំង 'new_value' ឬ 'new' ដើម្បីកុំឱ្យខុសលក្ខខណ្ឌទោះជាដាតាបេសប្រើ Column មួយណា
+        var val = item['new_value'] ?? item['new'];
+        if (val == null || val.toString().isEmpty) return false;
+
+        final parsedVal = double.tryParse(val.toString()) ?? 0;
+        return parsedVal > 0;
+      }).length;
+    });
+  }
+
+  void _selectCustomer(String code, String name) {
+    setState(() {
+      _activeCode = code;
+      _listeningCustomerName = name;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        iconTheme: const IconThemeData(color: Colors.white),
+        backgroundColor: _isRolloverWarning
+            ? Colors.redAccent
+            : Colors.blueAccent,
+        title: _isRolloverWarning
+            ? Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Colors.white),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _warningMessage,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              )
+            : (isSearching
+                  ? TextField(
+                      controller: searchController,
+                      autofocus: true,
+                      style: const TextStyle(color: Colors.white, fontSize: 16),
+                      decoration: const InputDecoration(
+                        hintText: "ស្វែងរកឈ្មោះ ឬលេខនាឡិកាស្ទង់...",
+                        hintStyle: TextStyle(color: Colors.white70),
+                        border: InputBorder.none,
+                      ),
+                      onChanged: (value) => runFilter(),
+                    )
+                  : const Text(
+                      "ស្រង់អំណាននាឡិកា",
+                      style: TextStyle(color: Colors.white, fontSize: 18),
+                    )),
+        actions: [
+          // ប៊ូតុងបិទសារព្រមាន (បង្ហាញតែពេលមានការព្រមាន)
+          if (_isRolloverWarning)
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.white),
+              onPressed: () => setState(() => _isRolloverWarning = false),
+            ),
+          if (!isSearching && !_isRolloverWarning) ...[
+            IconButton(
+              icon: const Icon(Icons.share, color: Colors.white),
+              onPressed: _exportDatabase,
+              tooltip: "Export Database",
+            ),
+            IconButton(
+              icon: const Icon(Icons.refresh, color: Colors.white),
+              onPressed: _refreshData,
+              tooltip: "ទាញទិន្នន័យថ្មី",
+            ),
+          ],
+        ],
+      ),
+      drawer: AppDrawer(
+        totalCount: totalCount,
+        doneCount: doneCount,
+        inputMode: _inputMode,
+        onBackup: () {
+          Navigator.pop(context);
+          _exportDatabase();
+        },
+        onImport: () {
+          Navigator.pop(context);
+          _handleImport();
+        },
+        onModeChanged: (mode) => setState(() => _inputMode = mode),
+      ),
+      body: isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(
+              children: [
+                FilterArea(
+                  areas: availableAreas,
+                  poles: availablePoles,
+                  boxes: availableBoxes,
+                  selectedArea: selectedArea,
+                  selectedPole: selectedPole,
+                  selectedBox: selectedBox,
+                  onAreaChanged: (val) {
+                    setState(() {
+                      selectedArea = val;
+                      selectedPole = null;
+                      selectedBox = null;
+                    });
+                    runFilter();
+                  },
+                  onPoleChanged: (val) {
+                    setState(() {
+                      selectedPole = val;
+                      selectedBox = null;
+                    });
+                    runFilter();
+                  },
+                  onBoxChanged: (val) {
+                    setState(() {
+                      selectedBox = val;
+                    });
+                    runFilter();
+                  },
+                ),
+                Expanded(
+                  child: filteredCustomers.isEmpty
+                      ? const Center(child: Text("មិនមានទិន្នន័យបង្ហាញទេ"))
+                      : ListView.builder(
+                          itemCount: filteredCustomers.length,
+                          itemBuilder: (context, index) {
+                            final customer = filteredCustomers[index];
+                            final String code =
+                                customer['code']?.toString() ?? "";
+                            // 💡 កូដដែលបានកែសម្រួលរួចរាល់៖ លុប onSubmitted ចោលដើម្បីកុំឱ្យលោតផ្ទាំងវិលជុំពេលកំពុងវាយ
+                            // 💡 កូដកែសម្រួលដាច់ណាត់៖ កាត់ផ្ដាច់ប្រព័ន្ធ Auto-Save តាម FocusNode ចោល ឱ្យមករក្សាទុកតាមប៊ូតុង Enter វិញ
+                            return CustomerCard(
+                              cust: customer,
+                              isActive: _activeCode == code,
+                              inputMode: _inputMode,
+                              mainController: controllers[code]!,
+                              focusNode: focusNodes[code]!,
+                              multController: multiplierControllers[code]!,
+                              previewUsage: previewUsage[code] ?? 0,
+                              onTap: () {
+                                _selectCustomer(code, customer['name'] ?? "");
+                                if (_inputMode == "manual") {
+                                  focusNodes[code]?.requestFocus();
+                                }
+                              },
+                              // ១. ពេលកំពុងវាយលេខ គ្រាន់តែធ្វើបច្ចុប្បន្នភាពរូបរាង Preview តិចៗ (មិនទាន់ Save ទេ)
+                              onPreviewChanged: (val) {
+                                final double oldVal =
+                                    double.tryParse(
+                                      customer['old_value']?.toString() ??
+                                          customer['old']?.toString() ??
+                                          '0',
+                                    ) ??
+                                    0;
+                                final double currentNew =
+                                    double.tryParse(val) ?? 0;
+                                final double multiplier =
+                                    double.tryParse(
+                                      multiplierControllers[code]?.text ?? '1',
+                                    ) ??
+                                    1.0;
+
+                                setState(() {
+                                  previewUsage[code] = _calculateUsageLogic(
+                                    oldVal,
+                                    currentNew,
+                                    multiplier,
+                                  );
+                                });
+                              },
+                              // ២. ថេរវេលាដ៏ត្រឹមត្រូវ៖ ទាល់តែចុចប៊ូតុង "Done" ឬ "Enter" លើ Keyboard ពេលវាយលេខចប់ ទើបវាហៅមុខងាររក្សាទុក និងឆែកវិលជុំតែម្ដងគត់!
+                              onSubmitted: (val) {
+                                _handleSave(code, val, customer);
+                              },
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
+      bottomNavigationBar: (_inputMode == "manual")
+          ? null
+          : _buildBottomActionControl(),
+    );
+  }
+
+  Widget _buildBottomActionControl() {
+    if (_activeCode.isEmpty) {
+      return Container(
+        padding: const EdgeInsets.all(20),
+        color: Colors.grey[100],
+        child: const Text(
+          "⚠️ សូមជ្រើសរើសអតិថិជនម្នាក់ជាមុនសិន",
+          textAlign: TextAlign.center,
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+      );
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(color: Colors.black12, blurRadius: 10, spreadRadius: 2),
+        ],
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      child: SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8.0),
+              child: Text(
+                "កំពុងរៀបចំសម្រាប់៖ $_listeningCustomerName",
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.blue[800],
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                if (_inputMode == "voice") _buildVoiceButton(),
+                if (_inputMode == "camera") _buildCameraButton(),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCameraButton() {
+    return Expanded(
+      child: ElevatedButton.icon(
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.orange,
+          padding: const EdgeInsets.symmetric(vertical: 15),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+        ),
+        icon: const Icon(Icons.camera_alt, color: Colors.white),
+        label: const Text(
+          "ថតរូបស្កេនលេខ",
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        onPressed: () => _captureAndScan(_activeCode),
+      ),
+    );
+  }
+
+  Widget _buildVoiceButton() {
+    return GestureDetector(
+      onTap: () => _listenToVoice(_activeCode),
+      child: CircleAvatar(
+        radius: 35,
+        backgroundColor: _isListening ? Colors.red : Colors.blue,
+        child: Icon(
+          _isListening ? Icons.stop : Icons.mic,
+          color: Colors.white,
+          size: 35,
+        ),
+      ),
+    );
+  }
+}

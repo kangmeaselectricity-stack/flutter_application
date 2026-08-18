@@ -1,0 +1,329 @@
+import 'package:flutter/material.dart';
+import '../screens/power_data_screen.dart';
+import '../screens/home_screen.dart';
+
+class AppDrawer extends StatelessWidget {
+  final int totalCount;
+  final int doneCount;
+  final String inputMode;
+  final VoidCallback onBackup;
+  final VoidCallback onImport;
+  final VoidCallback onExportExcel;
+  final Function(String) onModeChanged;
+
+  const AppDrawer({
+    super.key,
+    required this.totalCount,
+    required this.doneCount,
+    required this.inputMode,
+    required this.onBackup,
+    required this.onImport,
+    required this.onExportExcel,
+    required this.onModeChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Drawer(
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min, // 🎯 បង្ខំឱ្យ Column រួញតាមទំហំកូដពិត
+          children: [
+            // 🎯 កែប្រែ Header ឱ្យទាប និងរៀបចំជាជួរផ្តេក ស្អាតមិនហៀរអេក្រង់
+            Container(
+              width: double.infinity,
+              height: 140,
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.blueAccent, Colors.blue],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+              ),
+              padding: const EdgeInsets.only(top: 40, left: 16, right: 16),
+              child: Row(
+                children: [
+                  CircleAvatar(
+                    radius: 28,
+                    backgroundColor: Colors.white,
+                    child: // 🎯 កែសម្រួលដុំកូដរង្វង់មូល Logo ឱ្យត្រូវតាមស្តង់ដារបំបាត់ Error ភ្លាមៗ៖
+                    CircleAvatar(
+                      radius: 28,
+                      backgroundColor: Colors.white,
+                      child: ClipOval(
+                        child: Image.asset(
+                          "assets/images/logo.png",
+                          width: 52,
+                          height: 52,
+                          fit: BoxFit.cover,
+                          // 🚀 មុខងារស្ទាក់ចាប់៖ ប្រសិនបើរកមិនឃើញរូប logo.png ទេ ឱ្យវាបង្ហាញរូប Icon ជំនួសភ្លាម មិនឱ្យគាំង
+                          errorBuilder: (context, error, stackTrace) {
+                            return const Icon(
+                              Icons.electric_meter,
+                              color: Colors.blue,
+                              size: 26,
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Text(
+                          "ក្រុមស្រង់អំណាននាឡិកា",
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                            color: Colors.white,
+                          ),
+                        ),
+                        Text(
+                          "ថ្ងៃនេះ: ${DateTime.now().toString().split(' ')[0]}",
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            // 📊 ផ្នែកបង្ហាញទិន្នន័យស្ថិតិ (បង្រួមខាងលើខាងក្រោម) - ទំហំស្មើគ្នាស្អាតបេះបិទ
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Row(
+                children: [
+                  Expanded(child: _statBox("សរុប", "$totalCount", Colors.blue)),
+                  const SizedBox(width: 4),
+                  Expanded(child: _statBox("រួច", "$doneCount", Colors.green)),
+                  const SizedBox(width: 4),
+
+                  // 🚀 🎯 ដំណោះស្រាយ៖ ថែម Expanded គ្របពីខាងក្រៅ GestureDetector វិញ ដើម្បីឱ្យទំហំកាត "សល់" រីកស្មើប្រអប់ផ្សេងទៀត
+                  Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        Navigator.pop(context); // ១. បិទផ្ទាំង Drawer ភ្លាម
+
+                        // ២. បុកហោះត្រឡប់ទៅកាន់ HomeScreen ព្រមទាំងបញ្ជូនបញ្ជាឱ្យច្រោះយកតែអ្នកសល់
+                        Navigator.pushAndRemoveUntil(
+                          context,
+                          MaterialPageRoute(
+                            builder: (context) => const HomeScreen(
+                              filterRemaining: true,
+                            ), // 🚀 បញ្ជូនតម្លៃពិត true
+                          ),
+                          (route) => false, // សម្អាត Route ចាស់ៗចោលកុំឱ្យស្ទះ
+                        );
+                      },
+                      child: _statBox(
+                        "សល់",
+                        "${totalCount - doneCount}",
+                        Colors.red,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+
+            ListTile(
+              // 🚀 🎯 ដំណោះស្រាយ៖ លុបចោលអក្សរចិនចេញជំនួសដោយ Icons.bolt (រូបផ្លេកបន្ទោរ) ត្រឹមត្រូវតាមច្បាប់ Flutter
+              leading: const Icon(Icons.bolt, color: Colors.teal),
+              title: const Text("ស្រង់អំណាននាឡិកាស្ទង់មេ"),
+              onTap: () {
+                Navigator.pop(context); // បិទ Drawer មុន
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => const PowerDataScreen(),
+                  ),
+                );
+              },
+            ),
+
+            // 📂 ផ្នែកប៊ូតុងមុខងារ (រៀបចំឱ្យ dense ខ្លីៗ)
+            ListTile(
+              dense: true,
+              visualDensity: const VisualDensity(vertical: -2),
+              leading: const Icon(Icons.backup, color: Colors.blue, size: 20),
+              title: const Text(
+                "បម្រុងទុកទិន្នន័យ (Backup)",
+                style: TextStyle(fontSize: 14),
+              ),
+              onTap: onBackup,
+            ),
+            ListTile(
+              dense: true,
+              visualDensity: const VisualDensity(vertical: -2),
+              leading: const Icon(
+                Icons.border_outer_rounded,
+                color: Colors.teal,
+                size: 20,
+              ),
+              title: const Text(
+                "នាំចេញបញ្ជីអតិថិនជន",
+                style: TextStyle(fontSize: 14),
+              ),
+              onTap: onExportExcel,
+            ),
+            ListTile(
+              dense: true,
+              visualDensity: const VisualDensity(vertical: -2),
+              leading: const Icon(
+                Icons.file_upload,
+                color: Colors.green,
+                size: 20,
+              ),
+              title: const Text(
+                "នាំចូលទិន្នន័យខែថ្មី (.db)",
+                style: TextStyle(fontSize: 14),
+              ),
+              onTap: onImport,
+            ),
+            const Divider(height: 1),
+
+            // 🎯 ផ្នែកវិធីសាស្ត្របញ្ចូលលេខ (Mode)
+            Padding(
+              padding: const EdgeInsets.only(left: 14, top: 6, bottom: 2),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "វិធីសាស្រ្តបញ្ចូលលេខ (Mode)",
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 14,
+                    color: Colors.blue[800],
+                  ),
+                ),
+              ),
+            ),
+
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Column(
+                children: [
+                  _buildModeTile(
+                    context,
+                    "បញ្ចូលដោយដៃ (Keyboard)",
+                    Icons.keyboard,
+                    "manual",
+                  ),
+                  _buildModeTile(
+                    context,
+                    "ប្រើសម្លេង (Voice Mode)",
+                    Icons.mic,
+                    "voice",
+                  ),
+                  _buildModeTile(
+                    context,
+                    "ប្រើកាមេរ៉ា (Camera Mode)",
+                    Icons.camera_alt,
+                    "camera",
+                  ),
+                ],
+              ),
+            ),
+
+            const Divider(height: 10),
+            // 🎯 ដក Spacer ចេញ ដើម្បីឱ្យអក្សរប្រព័ន្ធមកដេកកៀកជួរខាងលើ លែងធ្លាក់ទៅបាតខ្លាំង
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text(
+                "Version 1.0.2",
+                style: TextStyle(color: Colors.grey, fontSize: 11),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 💡 មុខងារបង្កើតប៊ូតុងជម្រើស Mode បែបបង្រួមតូច
+  Widget _buildModeTile(
+    BuildContext context,
+    String title,
+    IconData icon,
+    String modeValue,
+  ) {
+    final bool isSelected = inputMode == modeValue;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      height: 38, // 🎯 កំណត់កម្ពស់ឱ្យថេរនិងទាប
+      decoration: BoxDecoration(
+        color: isSelected
+            ? Colors.blue.withValues(alpha: 0.1)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: isSelected ? Colors.blue : Colors.transparent,
+          width: 1,
+        ),
+      ),
+      child: ListTile(
+        dense: true,
+        visualDensity: const VisualDensity(vertical: -3),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        leading: Icon(
+          icon,
+          color: isSelected ? Colors.blue : Colors.grey[600],
+          size: 18,
+        ),
+        title: Text(
+          title,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected ? Colors.blue[900] : Colors.black87,
+          ),
+        ),
+        trailing: Icon(
+          isSelected ? Icons.check_circle : Icons.circle_outlined,
+          color: isSelected ? Colors.blue : Colors.grey[400],
+          size: 16,
+        ),
+        onTap: () {
+          onModeChanged(modeValue);
+          Navigator.pop(context);
+        },
+      ),
+    );
+  }
+
+  // 💡 មុខងារបង្កើតប្រអប់ស្ថិតិផ្ដេក រាងតូចល្មមស្អាត
+  Widget _statBox(String title, String value, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.2), width: 0.5),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(title, style: TextStyle(fontSize: 11, color: Colors.grey[700])),
+          const SizedBox(height: 2),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.bold,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

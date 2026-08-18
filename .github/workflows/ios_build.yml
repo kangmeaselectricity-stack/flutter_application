@@ -49,8 +49,11 @@ jobs:
         run: |
           flutter build ios \
             --release \
-            --no-codesign \
-            --verbose
+            --no-codesign
+        env:
+          CODE_SIGN_IDENTITY: ""
+          CODE_SIGNING_REQUIRED: "NO"
+          CODE_SIGNING_ALLOWED: "NO"
 
       - name: 📦 Package .ipa for Sideloadly
         run: |

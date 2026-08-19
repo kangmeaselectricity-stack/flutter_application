@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>634280687089-4i4mka6utc0pk203d6l1s68a2mh58ieo.apps.googleusercontent.com</string>
+	<string>634280687089-r50doioa7omcoj4i75jb05lkp48231uf.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.634280687089-4i4mka6utc0pk203d6l1s68a2mh58ieo</string>
+	<string>com.googleusercontent.apps.634280687089-r50doioa7omcoj4i75jb05lkp48231uf</string>
 	<key>ANDROID_CLIENT_ID</key>
 	<string>634280687089-5m4rtgt2c4sq8sihop9ioevcfo6p1pr2.apps.googleusercontent.com</string>
 	<key>API_KEY</key>
@@ -15,7 +15,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>MeterReading</string>
+	<string>com.example.flutterApplication</string>
 	<key>PROJECT_ID</key>
 	<string>meter-reading-654c0</string>
 	<key>STORAGE_BUCKET</key>
@@ -31,7 +31,7 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:634280687089:ios:b0021a1b84bb9a3a764050</string>
+	<string>1:634280687089:ios:acbc6326e42613f9764050</string>
 	<key>DATABASE_URL</key>
 	<string>https://meter-reading-654c0-default-rtdb.asia-southeast1.firebasedatabase.app</string>
 </dict>

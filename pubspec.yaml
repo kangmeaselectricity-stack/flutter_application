@@ -33,15 +33,15 @@ dependencies:
   gal: ^2.3.3
 
   # Cloud Backup & Sync dependencies
-  firebase_core: ^2.24.2
-  cloud_firestore: ^4.14.0
-  firebase_auth: ^4.16.0
-  firebase_storage: ^11.6.0
-  google_sign_in: ^6.1.6
-  googleapis: ^11.4.0
-  googleapis_auth: ^1.4.1
+  firebase_core: ^4.13.0
+  cloud_firestore: ^6.8.0
+  firebase_auth: ^6.5.7
+  firebase_storage: ^13.4.6
+  google_sign_in: ^7.2.0
+  googleapis: ^16.0.0
+  googleapis_auth: ^2.3.3
   device_info_plus: ^9.1.1
-  extension_google_sign_in_as_googleapis_auth: ^2.0.1
+  extension_google_sign_in_as_googleapis_auth: ^3.0.0
 
 dev_dependencies:
   flutter_test:

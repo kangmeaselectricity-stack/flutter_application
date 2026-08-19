@@ -16,12 +16,12 @@ dependencies:
   path: ^1.8.3
   file_picker: ^8.0.0
   path_provider: ^2.1.1
-  mobile_scanner: ^5.0.0
+  mobile_scanner: ^7.0.0
   speech_to_text: ^7.0.0
   image_picker: ^1.0.7
   image_cropper: ^8.0.2
-  google_mlkit_commons: ^0.8.0
-  google_mlkit_text_recognition: ^0.13.0
+  google_mlkit_commons: ^0.13.0
+  google_mlkit_text_recognition: ^0.17.0
   camera: ^0.11.0+2
   permission_handler: ^11.3.1
   cupertino_icons: ^1.0.8

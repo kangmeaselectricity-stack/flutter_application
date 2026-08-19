@@ -25,7 +25,7 @@ dependencies:
   camera: ^0.11.0+2
   permission_handler: ^11.3.1
   cupertino_icons: ^1.0.8
-  share_plus: 7.2.1
+  share_plus: ^12.0.2
   shared_preferences: ^2.0.15
   flutter_blue_plus: ^1.31.0
   excel: ^4.0.6

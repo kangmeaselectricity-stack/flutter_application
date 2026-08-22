@@ -124,6 +124,10 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
 
         String idKey = "row_${row['meter']}_$i";
         String currentNewVal = row['new_value']?.toString() ?? "";
+        if (currentNewVal == "0.0" || currentNewVal == "0") {
+          currentNewVal = "";
+          row['new_value'] = "";
+        }
 
         controllers[idKey] = TextEditingController(text: currentNewVal);
         focusNodes[idKey] = FocusNode();

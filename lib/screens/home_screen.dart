@@ -38,7 +38,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late stt.SpeechToText _speech;
   bool _isListening = false;
   String _activeCode = "";
-  String _inputMode = 'manual';
+  String _inputMode = 'voice';
   String _listeningCustomerName = "";
 
   final TextEditingController searchController = TextEditingController();
@@ -534,7 +534,13 @@ class _HomeScreenState extends State<HomeScreen> {
         if (!mounted) {
           return;
         }
-        await Share.shareXFiles([xFile], text: shareText, subject: shareText);
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [xFile],
+            text: shareText,
+            subject: shareText,
+          ),
+        );
       }
     } catch (e) {
       debugPrint("កំហុសក្នុងការ Export: $e");
@@ -788,9 +794,12 @@ class _HomeScreenState extends State<HomeScreen> {
         if (!mounted) {
           return;
         }
-        await Share.shareXFiles([
-          xFile,
-        ], text: '📊 របាយការណ៍ស្រង់អំណាន "$inspector"');
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [xFile],
+            text: '📊 របាយការណ៍ស្រង់អំណាន "$inspector"',
+          ),
+        );
       }
     } catch (e) {
       debugPrint("❌ កំហុសក្នុងការនាំចេញ Excel៖ $e");

@@ -10,7 +10,14 @@ import '../services/watermark_service.dart';
 import 'google_lens_screen.dart';
 
 class PowerDataScreen extends StatefulWidget {
-  const PowerDataScreen({super.key});
+  final bool filterRemaining;
+  final String? initialCode;
+
+  const PowerDataScreen({
+    super.key,
+    this.filterRemaining = false,
+    this.initialCode,
+  });
 
   @override
   State<PowerDataScreen> createState() => _PowerDataScreenState();
@@ -21,6 +28,8 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
   List<Map<String, dynamic>> filteredPowerData = [];
   bool isLoading = true;
   final TextEditingController searchController = TextEditingController();
+  bool filterRemaining = false;
+  String? selectedCode;
 
   final Map<String, TextEditingController> controllers = {};
   final Map<String, FocusNode> focusNodes = {};
@@ -35,6 +44,8 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
   @override
   void initState() {
     super.initState();
+    filterRemaining = widget.filterRemaining;
+    selectedCode = widget.initialCode;
     _loadPowerData();
     _loadInputMode();
   }
@@ -137,9 +148,9 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
 
       setState(() {
         allPowerData = mutableData;
-        filteredPowerData = mutableData;
         isLoading = false;
       });
+      _runFilter();
     } catch (e) {
       debugPrint("❌ កំហុសក្នុងការទាញ power_data៖ $e");
       setState(() => isLoading = false);
@@ -158,22 +169,39 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
     }
   }
 
-  void _runFilter(String query) {
-    if (query.isEmpty) {
-      setState(() => filteredPowerData = allPowerData);
-      return;
-    }
-    setState(() {
-      filteredPowerData = allPowerData.where((row) {
+  void _runFilter([String? queryParam]) {
+    String query = (queryParam ?? searchController.text).toLowerCase().trim();
+    List<Map<String, dynamic>> results = List.from(allPowerData);
+
+    if (query.isNotEmpty) {
+      results = results.where((row) {
         final village = row['display_village']?.toString().toLowerCase() ?? "";
         final meter = row['meter']?.toString().toLowerCase() ?? "";
         final code = row['code']?.toString().toLowerCase() ?? "";
         final pole = row['display_pole']?.toString().toLowerCase() ?? "";
-        return village.contains(query.toLowerCase()) ||
-            meter.contains(query.toLowerCase()) ||
-            code.contains(query.toLowerCase()) ||
-            pole.contains(query.toLowerCase());
+        return village.contains(query) ||
+            meter.contains(query) ||
+            code.contains(query) ||
+            pole.contains(query);
       }).toList();
+    }
+
+    if (selectedCode != null) {
+      results = results.where((row) {
+        final code = row['code']?.toString() ?? "";
+        return code == selectedCode;
+      }).toList();
+    }
+
+    if (filterRemaining) {
+      results = results.where((row) {
+        String newVal = row['new_value']?.toString() ?? "";
+        return newVal.isEmpty;
+      }).toList();
+    }
+
+    setState(() {
+      filteredPowerData = results;
     });
   }
 
@@ -307,8 +335,12 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
       MaterialPageRoute(
         builder: (context) => GoogleLensScreen(
           imageFile: croppedImage,
-          customerName: row['display_village']?.toString() ?? row['village']?.toString() ?? "Unknown",
-          customerCode: row['code']?.toString() ?? row['meter']?.toString() ?? "Unknown",
+          customerName:
+              row['display_village']?.toString() ??
+              row['village']?.toString() ??
+              "Unknown",
+          customerCode:
+              row['code']?.toString() ?? row['meter']?.toString() ?? "Unknown",
         ),
       ),
     );
@@ -488,6 +520,57 @@ class _PowerDataScreenState extends State<PowerDataScreen> {
               onChanged: _runFilter,
             ),
           ),
+          if (filterRemaining || selectedCode != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: Colors.orange.withValues(alpha: 0.3),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.filter_alt,
+                      color: Colors.orange,
+                      size: 18,
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "បង្ហាញតែនាឡិកាមេនៅសល់${selectedCode != null ? " អត្តលេខ $selectedCode" : ""}",
+                        style: const TextStyle(
+                          color: Colors.orange,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    GestureDetector(
+                      onTap: () {
+                        setState(() {
+                          filterRemaining = false;
+                          selectedCode = null;
+                        });
+                        _runFilter();
+                      },
+                      child: const Icon(
+                        Icons.close,
+                        color: Colors.orange,
+                        size: 18,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           Expanded(
             child: isLoading
                 ? const Center(

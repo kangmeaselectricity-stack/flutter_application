@@ -190,14 +190,33 @@ class CustomerCard extends StatelessWidget {
     if (mainController.text.isNotEmpty &&
         mainController.text.trim() != "" &&
         currentNew > 0) {
-      if (previewUsage == 0 && lastMonthUsage > 1.6) {
-        anomalyStatus = "🔴 សូន្យខុសធម្មតា";
-      } else if (lastMonthUsage > 0 &&
-          previewUsage >= (lastMonthUsage * 2) &&
-          previewUsage > 10) {
-        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
-      } else if (lastMonthUsage > 0 && previewUsage < (lastMonthUsage * 0.3)) {
-        anomalyStatus = "🟠 ថយចុះខ្លាំងខុសធម្មតា";
+      // ពិនិត្យករណីអតិថិជនថ្មី (អំណានចាស់ = 0 និងប្រវត្តិប្រើប្រាស់ 0 ទាំង 12 ខែ)
+      bool isNewCustomer = oldVal == 0 &&
+          (dateKeys.isEmpty ||
+              dateKeys.every((key) =>
+                  (double.tryParse(cust[key]?.toString() ?? '0') ?? 0) == 0));
+
+      if (isNewCustomer) {
+        final String ampClean = cust['amp']?.toString().toUpperCase().replaceAll(' ', '') ?? '';
+        if ((ampClean == '10A' || ampClean == '10') && previewUsage > 50) {
+          anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+        } else if ((ampClean == '20A' || ampClean == '20') && previewUsage > 100) {
+          anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+        } else if ((ampClean == '32A' || ampClean == '32') && previewUsage > 150) {
+          anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+        } else if ((ampClean == '63A' || ampClean == '63') && previewUsage > 300) {
+          anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+        }
+      } else {
+        if (previewUsage == 0 && lastMonthUsage > 1.6) {
+          anomalyStatus = "🔴 សូន្យខុសធម្មតា";
+        } else if (lastMonthUsage > 0 &&
+            previewUsage >= (lastMonthUsage * 2) &&
+            previewUsage > 10) {
+          anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+        } else if (lastMonthUsage > 0 && previewUsage < (lastMonthUsage * 0.3)) {
+          anomalyStatus = "🟠 ថយចុះខ្លាំងខុសធម្មតា";
+        }
       }
     }
 

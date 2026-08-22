@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'services/sync_service.dart';
+import 'services/webdav_service.dart';
 
 class DatabaseService {
   static DatabaseService _instance = DatabaseService.internal();
@@ -179,8 +180,9 @@ class DatabaseService {
         "💾 [RAW SQL SUCCESS] បានរក្សាទុកលេខ $numericValue ចូលអតិថិជនកូដ $code ថ្ងៃ $dateNow (បានកែប្រែ $count រ៉ូ)",
       );
 
-      // ☁️ ៤. បញ្ជូនទិន្នន័យទៅកាន់ Firebase Cloud ក្នុង Background ភ្លាមៗ (Auto Sync)
+      // ☁️ ៤. បញ្ជូនទិន្នន័យទៅកាន់ Firebase Cloud និង WebDAV (Synology NAS) ក្នុង Background
       if (count > 0) {
+        // Firebase sync
         try {
           final List<Map<String, dynamic>> res = await db.query(
             'sn_meter',
@@ -201,6 +203,17 @@ class DatabaseService {
           }
         } catch (syncErr) {
           debugPrint("⚠️ [Auto Sync Warning] Error querying for sync: $syncErr");
+        }
+
+        // WebDAV sync
+        try {
+          WebDavService().getCredentials().then((creds) {
+            if (creds['autoSync'] == true) {
+              unawaited(WebDavService().uploadDatabase());
+            }
+          });
+        } catch (webdavErr) {
+          debugPrint("⚠️ [WebDAV Auto Sync Warning] $webdavErr");
         }
       }
 
@@ -288,5 +301,77 @@ class DatabaseService {
       _database = null;
       debugPrint("💾 [SQLite] Closed database connection for restoration.");
     }
+  }
+
+  static bool isCustomerAbnormal(Map<String, dynamic> cust) {
+    final double oldVal = double.tryParse(cust['old_value']?.toString() ?? cust['old']?.toString() ?? '0') ?? 0;
+    
+    final String newValStr = cust['new_value']?.toString() ?? cust['new']?.toString() ?? "";
+    if (newValStr.isEmpty) return false;
+    
+    final double currentNew = double.tryParse(newValStr) ?? 0;
+    if (currentNew <= 0) return false;
+
+    double multiplier = 1.0;
+    if (cust['multiplier'] != null) {
+      multiplier = double.tryParse(cust['multiplier'].toString()) ?? 1.0;
+    }
+    
+    double usage = 0;
+    if (currentNew >= oldVal) {
+      usage = (currentNew - oldVal) * multiplier;
+    } else {
+      usage = ((100000 - oldVal) + currentNew) * multiplier;
+    }
+
+    List<String> dateKeys = cust.keys.where((key) => RegExp(r'^\d{2}-\d{4}$').hasMatch(key)).toList();
+    double lastMonthUsage = 0.0;
+    if (dateKeys.isNotEmpty) {
+      dateKeys.sort((a, b) {
+        List<String> partsA = a.split('-');
+        List<String> partsB = b.split('-');
+        int yearA = int.parse(partsA[1]);
+        int monthA = int.parse(partsA[0]);
+        int yearB = int.parse(partsB[1]);
+        int monthB = int.parse(partsB[0]);
+
+        if (yearA != yearB) return yearA.compareTo(yearB);
+        return monthA.compareTo(monthB);
+      });
+
+      String lastMonthName = dateKeys.length >= 2 ? dateKeys[dateKeys.length - 2] : dateKeys.last;
+      lastMonthUsage = double.tryParse(cust[lastMonthName]?.toString() ?? '0') ?? 0.0;
+    }
+
+    bool isNewCustomer = oldVal == 0 &&
+        (dateKeys.isEmpty ||
+            dateKeys.every((key) =>
+                (double.tryParse(cust[key]?.toString() ?? '0') ?? 0) == 0));
+
+    String anomalyStatus = "";
+    if (isNewCustomer) {
+      final String ampClean = cust['amp']?.toString().toUpperCase().replaceAll(' ', '') ?? '';
+      if ((ampClean == '10A' || ampClean == '10') && usage > 50) {
+        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+      } else if ((ampClean == '20A' || ampClean == '20') && usage > 100) {
+        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+      } else if ((ampClean == '32A' || ampClean == '32') && usage > 150) {
+        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+      } else if ((ampClean == '63A' || ampClean == '63') && usage > 300) {
+        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+      }
+    } else {
+      if (usage == 0 && lastMonthUsage > 1.6) {
+        anomalyStatus = "🔴 សូន្យខុសធម្មតា";
+      } else if (lastMonthUsage > 0 &&
+          usage >= (lastMonthUsage * 2) &&
+          usage > 10) {
+        anomalyStatus = "⚠️ កើនឡើងខ្លាំងខុសធម្មតា";
+      } else if (lastMonthUsage > 0 && usage < (lastMonthUsage * 0.3)) {
+        anomalyStatus = "🟠 ថយចុះខ្លាំងខុសធម្មតា";
+      }
+    }
+
+    return anomalyStatus.isNotEmpty;
   }
 }

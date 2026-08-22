@@ -21,7 +21,14 @@ import 'google_lens_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   final bool filterRemaining;
-  const HomeScreen({super.key, this.filterRemaining = false});
+  final bool filterAbnormal;
+  final String? initialArea;
+  const HomeScreen({
+    super.key,
+    this.filterRemaining = false,
+    this.filterAbnormal = false,
+    this.initialArea,
+  });
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -34,11 +41,13 @@ class _HomeScreenState extends State<HomeScreen> {
   bool isSearching = false;
   bool _isRolloverWarning = false;
   String _warningMessage = "";
+  bool showRemainingOnly = false;
+  bool showAbnormalOnly = false;
 
   late stt.SpeechToText _speech;
   bool _isListening = false;
   String _activeCode = "";
-  String _inputMode = 'manual';
+  String _inputMode = 'voice';
   String _listeningCustomerName = "";
 
   final TextEditingController searchController = TextEditingController();
@@ -64,6 +73,11 @@ class _HomeScreenState extends State<HomeScreen> {
       DeviceOrientation.portraitDown,
     ]);
     _speech = stt.SpeechToText();
+    showRemainingOnly = widget.filterRemaining;
+    showAbnormalOnly = widget.filterAbnormal;
+    if (widget.initialArea != null) {
+      selectedArea = widget.initialArea;
+    }
     _refreshData();
   }
 
@@ -380,7 +394,9 @@ class _HomeScreenState extends State<HomeScreen> {
       String mVal = "1";
       if (cust['multiplier'] != null) {
         double mDouble = double.tryParse(cust['multiplier'].toString()) ?? 1.0;
-        mVal = mDouble == mDouble.toInt() ? mDouble.toInt().toString() : mDouble.toString();
+        mVal = mDouble == mDouble.toInt()
+            ? mDouble.toInt().toString()
+            : mDouble.toString();
       }
 
       if (!multiplierControllers.containsKey(code)) {
@@ -400,30 +416,27 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) {
       setState(() {
         allCustomers = data;
-        if (widget.filterRemaining) {
-          filteredCustomers = data.where((cust) {
-            String newVal =
-                cust['new']?.toString().trim() ??
-                cust['new_value']?.toString().trim() ??
-                "";
-            return newVal.isEmpty;
-          }).toList();
-        } else {
-          filteredCustomers = List.from(data);
-        }
-
         isLoading = false;
-        if (!widget.filterRemaining) {
-          runFilter();
-        }
       });
+      runFilter();
 
-      if (widget.filterRemaining) {
+      if (showRemainingOnly) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
               "🔍 បានចម្រោះបង្ហាញតែអតិថិជននៅសល់ចំនួន ${filteredCustomers.length} នាក់",
+            ),
+            backgroundColor: Colors.redAccent,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      } else if (showAbnormalOnly) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              "🔍 បានចម្រោះបង្ហាញតែអតិថិជនខុសប្រក្រតីចំនួន ${filteredCustomers.length} នាក់",
             ),
             backgroundColor: Colors.redAccent,
             duration: const Duration(seconds: 2),
@@ -455,13 +468,19 @@ class _HomeScreenState extends State<HomeScreen> {
       results = results.where((c) => c['box'] == selectedBox).toList();
     }
 
-    if (widget.filterRemaining) {
+    if (showRemainingOnly) {
       results = results.where((cust) {
         String newVal =
             cust['new']?.toString().trim() ??
             cust['new_value']?.toString().trim() ??
             "";
         return newVal.isEmpty;
+      }).toList();
+    }
+
+    if (showAbnormalOnly) {
+      results = results.where((cust) {
+        return DatabaseService.isCustomerAbnormal(cust);
       }).toList();
     }
 
@@ -534,7 +553,9 @@ class _HomeScreenState extends State<HomeScreen> {
         if (!mounted) {
           return;
         }
-        await Share.shareXFiles([xFile], text: shareText, subject: shareText);
+        await SharePlus.instance.share(
+          ShareParams(files: [xFile], text: shareText, subject: shareText),
+        );
       }
     } catch (e) {
       debugPrint("កំហុសក្នុងការ Export: $e");
@@ -788,9 +809,12 @@ class _HomeScreenState extends State<HomeScreen> {
         if (!mounted) {
           return;
         }
-        await Share.shareXFiles([
-          xFile,
-        ], text: '📊 របាយការណ៍ស្រង់អំណាន "$inspector"');
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [xFile],
+            text: '📊 របាយការណ៍ស្រង់អំណាន "$inspector"',
+          ),
+        );
       }
     } catch (e) {
       debugPrint("❌ កំហុសក្នុងការនាំចេញ Excel៖ $e");
@@ -911,6 +935,114 @@ class _HomeScreenState extends State<HomeScreen> {
                     runFilter();
                   },
                 ),
+                if (showRemainingOnly)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.red.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.filter_alt,
+                            color: Colors.red,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              "បង្ហាញតែអតិថិជននៅសល់${selectedArea != null ? " ក្នុងតំបន់ $selectedArea" : ""}",
+                              style: const TextStyle(
+                                color: Colors.red,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                showRemainingOnly = false;
+                                selectedArea = null;
+                              });
+                              runFilter();
+                            },
+                            child: const Icon(
+                              Icons.close,
+                              color: Colors.red,
+                              size: 18,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                if (showAbnormalOnly)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.1),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: Colors.red.withValues(alpha: 0.3),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(
+                            Icons.warning,
+                            color: Colors.red,
+                            size: 18,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              "បង្ហាញតែអតិថិជនខុសប្រក្រតី${selectedArea != null ? " ក្នុងតំបន់ $selectedArea" : ""}",
+                              style: const TextStyle(
+                                color: Colors.red,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          GestureDetector(
+                            onTap: () {
+                              setState(() {
+                                showAbnormalOnly = false;
+                                selectedArea = null;
+                              });
+                              runFilter();
+                            },
+                            child: const Icon(
+                              Icons.close,
+                              color: Colors.red,
+                              size: 18,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                 Expanded(
                   child: filteredCustomers.isEmpty
                       ? const Center(child: Text("មិនមានទិន្នន័យបង្ហាញទេ"))
